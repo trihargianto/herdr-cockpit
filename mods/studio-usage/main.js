@@ -7,7 +7,7 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { agents, hc, exec, home, panes, spaces, theme, window, settings, layout } from "herdr";
+import { agents, hc, exec, home, machines, panes, spaces, theme, window, settings, layout } from "herdr";
 
 const ICONS = "mods/studio-workspace-chrome";
 const BARS = "[█▓▒░]";
@@ -35,7 +35,7 @@ function resetIn(ms) {
 const CPU_COLOR = "#56B4E9", MEM_COLOR = "#E69F00";
 
 const CTX_ROW = 30, CTX_GAP = 12, CTX_SHOWN = 3; // Context rows are short: three fit the scroll view
-const CARD = 86, GAP = 8; // a card's fixed height; two of them fill a section's scroll view
+const CARD = 86, CARD2 = 122, GAP = 8; // a card's fixed height; two of them fill a section's scroll view
 
 const mem = (kb) => (kb >= 1048576 ? `${(kb / 1048576).toFixed(1)} GB` : kb >= 1024 ? `${Math.round(kb / 1024)} MB` : `${kb} KB`);
 const cpu = (v) => `${v >= 100 ? Math.round(v) : v.toFixed(1)}%`;
@@ -130,13 +130,15 @@ export default class Usage extends View {
     this.acct = load("account-limits", {});
     this.loading = false;
     this.last = 0;
-    this.mon = null; // { at, spaces: [...], panes: [...] }
-    this.monBusy = false;
+    this.mons = {}; // machine key ("" is this computer) -> { at, spaces: [...], panes: [...] }
+    this.monBusy = new Set();
+    this.monErr = {}; // machine key -> why its last reading failed
+    this.machine = load("monitor-machine", null); // the tab shown: null is this computer
     this.pids = new Map(); // terminal address -> its shell's pid
     this.folded = load("monitor-folded", {}); // section title -> true when folded
     this.heights = load("monitor-heights", {}); // section title -> the height the person dragged it to
     this.drag = null; // { title, y, h } while a list's bottom edge is held
-    this.sys = null; // { cores, ramKb }, read once
+    this.sys = {}; // machine key -> { os, cores, ramKb }, read once per machine
     // Reads once a minute, but only while this pane is the one shown (and at once when it opens).
     cx.timer.every(3000, (cx) => {
       if (!shown("usage")) return;
@@ -148,12 +150,15 @@ export default class Usage extends View {
 
   // CPU and memory per pane (its shell plus every process under it), then per space.
   monitor(cx) {
-    if (this.monBusy) return;
-    this.monBusy = true;
+    const machine = this.machine && machines().some((m) => m.name === this.machine) ? this.machine : null;
+    const mk = machine ?? "";
+    const on = machine; // where `ps` and friends run
+    if (this.monBusy.has(mk)) return;
+    this.monBusy.add(mk);
     const tabInfo = new Map();
     const local = [];
     for (const sp of spaces()) {
-      if (sp.machine) continue;
+      if ((sp.machine ?? null) !== machine) continue;
       local.push(sp);
       for (const t of sp.tabs) tabInfo.set(t.id, { space: sp, tab: t });
     }
@@ -166,20 +171,34 @@ export default class Usage extends View {
           const pid = r.code === 0 ? JSON.parse(r.stdout).pid : null;
           if (pid) this.pids.set(p.terminal, pid);
         }
-        if (!this.sys) {
-          const r = await exec("sysctl", ["-n", "hw.ncpu", "hw.memsize"], { cwd: home(), timeout: 5000 });
-          const [cores, bytes] = r.stdout.trim().split(/\s+/).map(Number);
-          if (cores && bytes) this.sys = { cores, ramKb: bytes / 1024 };
+        const run = (cmd, args, timeout = 5000) => exec(cmd, args, { cwd: machine ? undefined : home(), on, timeout });
+        if (!this.sys[mk]) {
+          const os = (await run("uname", ["-s"])).stdout.trim();
+          if (os === "Darwin") {
+            const r = await run("sysctl", ["-n", "hw.ncpu", "hw.memsize"]);
+            const [cores, bytes] = r.stdout.trim().split(/\s+/).map(Number);
+            if (cores && bytes) this.sys[mk] = { os, cores, ramKb: bytes / 1024 };
+          } else {
+            const cores = Number((await run("nproc", [])).stdout.trim());
+            const kb = Number((await run("sh", ["-c", "grep MemTotal /proc/meminfo"])).stdout.match(/(\d+)/)?.[1]);
+            if (cores && kb) this.sys[mk] = { os, cores, ramKb: kb };
+          }
         }
-        const out = await exec("ps", ["-axo", "pid=,ppid=,pcpu=,rss="], { cwd: home(), timeout: 15000 });
-        // The whole computer, as Activity Monitor counts "Memory Used": app (anonymous) + wired + compressed.
+        const out = await run("ps", ["-axo", "pid=,ppid=,pcpu=,rss="], 15000);
+        // The whole computer. macOS, as Activity Monitor counts "Memory Used": app (anonymous) + wired + compressed.
+        // Linux: total minus what is available.
         let sysMemKb = null;
         try {
-          const vm = (await exec("vm_stat", [], { cwd: home(), timeout: 5000 })).stdout;
-          const page = Number(vm.match(/page size of (\d+)/)?.[1]);
-          const pages = (k) => Number(vm.match(new RegExp(`${k}:\\s+(\\d+)`))?.[1]);
-          const n = pages("Anonymous pages") + pages("Pages wired down") + pages("Pages occupied by compressor");
-          if (page && n) sysMemKb = (n * page) / 1024;
+          if (this.sys[mk]?.os === "Darwin") {
+            const vm = (await run("vm_stat", [])).stdout;
+            const page = Number(vm.match(/page size of (\d+)/)?.[1]);
+            const pages = (k) => Number(vm.match(new RegExp(`${k}:\\s+(\\d+)`))?.[1]);
+            const n = pages("Anonymous pages") + pages("Pages wired down") + pages("Pages occupied by compressor");
+            if (page && n) sysMemKb = (n * page) / 1024;
+          } else if (this.sys[mk]) {
+            const mi = (await run("sh", ["-c", "grep MemAvailable /proc/meminfo"])).stdout.match(/(\d+)/)?.[1];
+            if (mi) sysMemKb = this.sys[mk].ramKb - Number(mi);
+          }
         } catch {}
         const proc = new Map();
         const kids = new Map();
@@ -214,13 +233,16 @@ export default class Usage extends View {
           cpu: rows.filter((r) => r.space === sp.id).reduce((a, r) => a + r.cpu, 0),
           mem: rows.filter((r) => r.space === sp.id).reduce((a, r) => a + r.mem, 0),
         }));
-        this.mon = {
+        delete this.monErr[mk];
+        this.mons[mk] = {
           at: Date.now(), spaces: bySpace, panes: rows,
           cpu: rows.reduce((a, r) => a + r.cpu, 0), mem: rows.reduce((a, r) => a + r.mem, 0),
           sysCpu: [...proc.values()].reduce((a, x) => a + x.c, 0), sysMem: sysMemKb,
         };
-      } catch {}
-      this.monBusy = false;
+      } catch (e) {
+        this.monErr[mk] = String(e?.message ?? e ?? "unreachable").split("\n")[0];
+      }
+      this.monBusy.delete(mk);
       cx.notify();
     });
   }
@@ -316,7 +338,7 @@ export default class Usage extends View {
     const none = wins.every((w) => !w);
     const newest = Math.max(0, ...wins.map((w) => w?.readAt ?? 0));
     const old = newest > 0 && now - newest > 120000;
-    return v_flex().flex_none().p(14).gap(14).rounded(10).border(1).border_color(t.border).bg(t.chrome)
+    return v_flex().w_full().flex_none().p(12).gap(12).rounded(10).border(1).border_color(t.border).bg(t.chrome)
       .child(h_flex().items_center().gap(8)
         .child(div().size(8).rounded(2).bg(accent))
         .child(div().flex_1().text_size(13).font_semibold().child(name))
@@ -372,20 +394,33 @@ export default class Usage extends View {
     const sorted = [...items].sort((a, b) => load(b) - load(a) || a.name.localeCompare(b.name));
     const topCpu = Math.max(1, ...items.map((r) => r.cpu)), topMem = Math.max(1, ...items.map((r) => r.mem));
     const folded = Boolean(this.folded[title]);
-    const n = sorted.length;
-    const height = this.heights[title] ?? (n > 2 ? CARD * 2 + GAP : n * CARD + Math.max(0, n - 1) * GAP);
+    // Spaces sit two to a row: narrower cards, so the name has its own line and the two meters stack.
+    const wide = title !== "Spaces";
+    const cardH = wide ? CARD : CARD2;
+    const card = (r) => v_flex().id(`mon-${title}-${r.id}`).flex_none().h(cardH).gap(wide ? 10 : 8).px(12).py(11).rounded(10).bg(t.raised)
+      .when(!wide, (c) => c.flex_1().min_w(0))
+      .child(h_flex().gap(8).items_center()
+        .when(Boolean(r.icon?.icon), (el) => el.child(r.icon.tint ? svg(r.icon.icon).size(14).flex_none().text_color(t.foreground) : image(r.icon.icon).size(14).flex_none()))
+        .child(div().flex_1().min_w(0).truncate().text_size(12.5).font_medium().tooltip(`${r.name}\n${r.sub}`).child(r.name))
+        .when(wide, (el) => el.child(div().flex_none().max_w(110).truncate().text_size(11).text_color(t.dim).child(r.sub))))
+      .when(!wide, (c) => c.child(div().truncate().text_size(11).text_color(t.dim).child(r.sub)))
+      .child((wide ? h_flex().gap(14) : v_flex().gap(8))
+        .child(this.metric(t, "CPU", CPU_COLOR, cpu(r.cpu), r.cpu / topCpu))
+        .child(this.metric(t, "MEM", MEM_COLOR, mem(r.mem), r.mem / topMem)));
+    // Flexbox rows of two (no grid); an odd last card gets an empty half so it keeps its width.
+    const rows = wide ? sorted.map(card) : Array.from({ length: Math.ceil(sorted.length / 2) }, (_, k) => {
+      const pair = sorted.slice(k * 2, k * 2 + 2);
+      return h_flex().id(`mon-row-${title}-${k}`).flex_none().h(cardH).gap(GAP)
+        .children(pair.map(card))
+        .when(pair.length === 1, (r) => r.child(div().flex_1().min_w(0)));
+    });
+    const n = rows.length;
+    const height = this.heights[title] ?? (n > 2 ? cardH * 2 + GAP : n * cardH + Math.max(0, n - 1) * GAP);
     return v_flex().flex_none().gap(6)
       .child(this.foldHeader(t, title, items.length))
       .when(!folded, (el) => el.child(v_flex().id(`mon-list-${title}`).gap(GAP).min_h(0)
         .h(height).overflow_y_scrollbar()
-        .children(sorted.map((r) => v_flex().id(`mon-${title}-${r.id}`).flex_none().h(CARD).gap(10).px(12).py(11).rounded(10).bg(t.raised)
-        .child(h_flex().gap(8).items_center()
-          .when(Boolean(r.icon?.icon), (el) => el.child(r.icon.tint ? svg(r.icon.icon).size(14).flex_none().text_color(t.foreground) : image(r.icon.icon).size(14).flex_none()))
-          .child(div().flex_1().min_w(0).truncate().text_size(12.5).font_medium().tooltip(`${r.name}\n${r.sub}`).child(r.name))
-          .child(div().flex_none().max_w(110).truncate().text_size(11).text_color(t.dim).child(r.sub)))
-        .child(h_flex().gap(14)
-          .child(this.metric(t, "CPU", CPU_COLOR, cpu(r.cpu), r.cpu / topCpu))
-          .child(this.metric(t, "MEM", MEM_COLOR, mem(r.mem), r.mem / topMem))))))
+        .children(rows))
         .child(this.resizeHandle(t, title, height)));
   }
 
@@ -406,10 +441,46 @@ export default class Usage extends View {
       .child(div().text_size(11).text_color(t.muted).truncate().child(`Herdr panes · ${mine}`));
   }
 
+  // The machine whose tab is shown: null is this computer. One that was removed falls back to it.
+  shownMachine() {
+    return this.machine && machines().some((m) => m.name === this.machine) ? this.machine : null;
+  }
+
+  // A tab per machine, only once a second one is known. Flexbox pills; the choice is remembered.
+  machineTabs(t) {
+    const others = machines().filter((m) => m.name);
+    if (!others.length) return null;
+    const current = this.shownMachine();
+    const tab = (name, text, away) => {
+      const on = name === current;
+      return h_flex().id(`mon-machine-${name ?? "local"}`).h(26).px(10).items_center().gap(6).flex_none().rounded(6).cursor_pointer()
+        .text_size(12).font_medium().text_color(on ? t.foreground : t.dim).bg(on ? t.raised : t.chrome)
+        .hover((s) => s.bg(t.hover)).active((s) => s.bg(t.selected))
+        .accessibility_label(`${text}${away ? ", unavailable" : ""}${on ? ", shown" : ""}`)
+        .on_click((_e, cx) => {
+          this.machine = name;
+          save("monitor-machine", name);
+          this.monitor(cx);
+          cx.notify();
+        })
+        .when(away, (el) => el.child(div().size(6).rounded(3).bg(t.dim)))
+        .child(text);
+    };
+    return h_flex().flex_none().gap(4).px(12).pb(6).flex_wrap()
+      .child(tab(null, "This Mac", false))
+      .children(others.map((m) => tab(m.name, m.name, m.layout === "unavailable")));
+  }
+
   monitorCard(t) {
-    const m = this.mon;
-    if (!m) return div().px(4).py(8).text_size(12).text_color(t.dim).child("Reading processes…");
-    const sys = this.sys;
+    const mk = this.shownMachine() ?? "";
+    const m = this.mons[mk];
+    if (!m) {
+      const why = this.monErr[mk];
+      return div().px(4).py(8).text_size(12).text_color(why ? t.blocked : t.dim).whitespace_normal()
+        .child(why ? `Can't reach ${mk}: ${why}` : "Reading processes…");
+    }
+    const sys = this.sys[mk];
+    const label = mk ? mk.toUpperCase() : "MAC";
     const cap = sys ? sys.cores * 100 : 100;
     const cpuAll = Math.min(1, m.sysCpu / cap), cpuMine = Math.min(1, m.cpu / cap);
     const ram = sys?.ramKb ?? 0;
@@ -417,12 +488,12 @@ export default class Usage extends View {
     const pct1 = (f) => (f >= 0.1 ? `${Math.round(f * 100)}%` : `${(f * 100).toFixed(1)}%`);
     return v_flex().flex_none().gap(14)
       .child(h_flex().gap(8)
-        .child(this.tile(t, "CPU · WHOLE MAC", CPU_COLOR, pct1(cpuAll), sys ? `${sys.cores} cores` : "", cpuAll, pct1(cpuMine), cpuMine))
-        .child(this.tile(t, "MEMORY · WHOLE MAC", MEM_COLOR, m.sysMem ? mem(m.sysMem) : "n/a", ram ? `${Math.round(memAll * 100)}% of ${mem(ram)}` : "", memAll, mem(m.mem), memMine)))
+        .child(this.tile(t, `CPU · WHOLE ${label}`, CPU_COLOR, pct1(cpuAll), sys ? `${sys.cores} cores` : "", cpuAll, pct1(cpuMine), cpuMine))
+        .child(this.tile(t, `MEMORY · WHOLE ${label}`, MEM_COLOR, m.sysMem ? mem(m.sysMem) : "n/a", ram ? `${Math.round(memAll * 100)}% of ${mem(ram)}` : "", memAll, mem(m.mem), memMine)))
       .child(this.usageList(t, "Spaces", m.spaces))
       .child(this.usageList(t, "Panes", m.panes))
       .child(div().px(4).text_size(11).text_color(t.dim).whitespace_normal()
-        .child("Tiles show the whole Mac, like Activity Monitor. Cards below are Herdr's panes only, busiest first: a pane counts its shell and everything it started. CPU on cards is 100% per busy core."));
+        .child(`Tiles show the whole ${mk || "Mac"}, like Activity Monitor. Cards below are Herdr's panes only, busiest first: a pane counts its shell and everything it started. CPU on cards is 100% per busy core.`));
   }
 
   render() {
@@ -430,13 +501,15 @@ export default class Usage extends View {
     const now = Date.now();
     const d = this.data;
     const mono = settings().font_family ?? "JetBrains Mono";
-    const contexts = [...(d?.contexts ?? [])].sort((a, b) => b.context - a.context);
+    const here = this.shownMachine();
+    const contexts = [...(d?.contexts ?? [])].filter((c) => (c.address.includes("/") ? c.address.split("/")[0] : null) === here).sort((a, b) => b.context - a.context);
     return v_flex().size_full().min_w(0).min_h(0).bg(t.chrome).text_color(t.foreground).text_size(13)
       .child(h_flex().flex_none().px(14).pt(14).pb(10).items_center().gap(8)
         .child(div().text_size(13).font_semibold().child("Monitoring"))
         .child(div().flex_1())
         .when(Boolean(d?.at), (el) => el.child(div().text_size(11).text_color(t.dim).child(ago(now - d.at))))
         .child(this.iconButton(t, "usage-refresh", "mods/studio-usage/refresh.svg", "Refresh", (cx) => { this.refresh(cx); this.monitor(cx); })))
+      .children(this.machineTabs(t) ? [this.machineTabs(t)] : [])
       .child(v_flex().id("usage-scroll").flex_1().min_h(0).px(12).pb(14).gap(10).overflow_y_scrollbar()
         .on_mouse_move((e, cx) => {
           if (!this.drag) return;
@@ -451,9 +524,14 @@ export default class Usage extends View {
         })
         .child(this.monitorCard(t))
         .when(!d, (el) => el.child(div().px(4).py(8).text_color(t.dim).child("Reading the agents' status lines…")))
-        .child(this.account(t, "Claude", t.ansi3, this.acct.claude, now))
-        .child(this.account(t, "Codex", t.ansi4, this.acct.codex, now))
-        .child(this.account(t, "Antigravity", t.ansi5, this.acct.antigravity, now, true))
+        // Account limits are not shown on another machine's tab for now.
+        // Two to a row (flexbox, no grid); the odd one out keeps a half-width slot.
+        .when(here === null, (el) => el.child(h_flex().flex_none().gap(8).items_start()
+          .child(div().flex_1().min_w(0).child(this.account(t, "Claude", t.ansi3, this.acct.claude, now)))
+          .child(div().flex_1().min_w(0).child(this.account(t, "Codex", t.ansi4, this.acct.codex, now))))
+          .child(h_flex().flex_none().gap(8).items_start()
+            .child(div().flex_1().min_w(0).child(this.account(t, "Antigravity", t.ansi5, this.acct.antigravity, now, true)))
+            .child(div().flex_1().min_w(0))))
         .when(Boolean(d) && contexts.length > 0, (el) => el.child(v_flex().flex_none().gap(6)
           .child(this.foldHeader(t, "Context", contexts.length))
           .when(!this.folded.Context, (sec) => sec.child(v_flex().id("ctx-list").p(12).rounded(10).bg(t.raised).min_h(0)
@@ -469,7 +547,7 @@ export default class Usage extends View {
                 .child(h_flex().h(4).rounded(2).overflow_hidden().bg(t.chrome).child(div().h_full().w(`${Math.min(100, c.context)}%`).bg(this.tone(t, c.context)))))))))))
         .when(Boolean(d) && contexts.length === 0, (el) => el.child(div().px(4).py(6).text_size(12).text_color(t.dim).whitespace_normal()
           .child("No agent is showing a context meter. Run Claude with its status line, or Codex, in a terminal.")))
-        .when(Boolean(d), (el) => el.child(div().px(4).pt(2).text_size(11).text_color(t.dim).whitespace_normal()
+        .when(Boolean(d) && here === null, (el) => el.child(div().px(4).pt(2).text_size(11).text_color(t.dim).whitespace_normal()
           .child("Read from the agents' own status lines, once a minute."))));
   }
 }

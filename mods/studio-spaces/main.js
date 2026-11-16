@@ -3,9 +3,9 @@
 // its first terminal is in now, only where unusual: branch, ahead/behind. Agent state lives in the agents list, not here. Click to
 // switch, right-click for its menu, drag to reorder.
 
-import { View, div, svg } from "gpui-kit";
+import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { agents, spaces, machines, panes, run, openOverlay, exec, hc, theme, shared, setShared, watchFolder, window, layout } from "herdr";
+import { agents, spaces, machines, panes, terminals, run, openOverlay, exec, hc, theme, shared, setShared, watchFolder, window, layout, settings } from "herdr";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -29,6 +29,8 @@ function place(s, ps) {
 const rowHeight = ({ tree, detail }) => (detail ? 44 : tree ? 28 : 30);
 // A leading emoji in a name is the avatar; the text keeps the rest.
 const EMOJI = /^\p{Extended_Pictographic}(?:\ufe0f|\u200d\p{Extended_Pictographic}|[\u{1f3fb}-\u{1f3ff}])*\s*/u;
+const TERM_ROW = 26, TAB_ROW = 24;
+const tabName = (tab) => (tab.named ? tab.name : `Tab ${tab.index}`);
 const split = (name) => {
   const m = name.match(EMOJI);
   const rest = m ? name.slice(m[0].length).trim() : name;
@@ -78,6 +80,7 @@ export default class Spaces extends View {
     this.reconnecting = JSON.parse(localStorage.getItem("machines.reconnecting") ?? "{}");
     for (const state of Object.values(this.reconnecting)) state.busy = false;
     this.folded = new Set(JSON.parse(localStorage.getItem("machines.folded") ?? "[]"));
+    this.open = new Set(JSON.parse(localStorage.getItem("spaces.open") ?? "[]")); // spaces showing their terminals
     this.refreshMachines(cx);
     cx.timer.every(15000, cx => this.refreshMachines(cx));
     // Refresh only when the refs could have changed (see `due`).
@@ -374,16 +377,11 @@ export default class Spaces extends View {
     });
   }
 
-  // Only what's unusual: "herdr \u00b7 spike". The repo or branch goes when the name
-  // already says it (a worktree is named after its branch, maybe prefixed), and
-  // master/main go: nearly every space is on one.
+  // Only what's unusual: the repo, when the space's name doesn't already say it. The branch is
+  // left out on purpose: it is noise in a list of places.
   detail(g, tree, name) {
-    const raw = g.branch ?? "detached";
     const norm = (a) => a.toLowerCase().replace(/^worktree[-/]/, "");
-    const same = (a) => norm(a) === norm(name);
-    const branch = same(raw) || raw === "master" || raw === "main" ? "" : raw;
-    const repo = tree || same(g.name) ? "" : g.name;
-    return [repo, branch].filter(Boolean).join(" \u00b7 ");
+    return tree || norm(g.name) === norm(name) ? "" : g.name;
   }
 
   // The most urgent agent state of a space: a spinner, a ! or a dot, and how many agents share it.
@@ -395,7 +393,85 @@ export default class Spaces extends View {
     return null;
   }
 
-  row({ w, i, g, tree }, t) {
+  // A space and, when expanded, the terminals inside it.
+  row(r, t) {
+    const { w } = r;
+    const kids = this.terminalsOf(w);
+    const open = this.open.has(w.id) && kids.length > 0;
+    const toggle = (cx) => {
+      if (this.open.has(w.id)) this.open.delete(w.id); else this.open.add(w.id);
+      try { localStorage.setItem("spaces.open", JSON.stringify([...this.open])); } catch {}
+      cx.notify();
+    };
+    const box = this.rowBox(r, t, { count: kids.length, open, toggle });
+    if (!open) return box;
+    // Space, then its tabs, then their terminals, each level inside a guide line (as in the Panes panel).
+    const groups = [];
+    for (const k of kids) {
+      const key = k.tab.id ?? k.tab.name;
+      const g = groups.find((x) => x.key === key) ?? (groups.push({ key, tab: k.tab, items: [] }), groups.at(-1));
+      g.items.push(k);
+    }
+    this.measure += kids.length * TERM_ROW + groups.length * TAB_ROW;
+    const guide = (el) => el.ml(r.tree ? 40 : 18).pl(5).min_w(0).border_l(1).border_color(t.border);
+    return v_flex().id(`space-block-${w.id}`).flex_none().child(box)
+      .child(guide(v_flex().children(groups.map((g) => v_flex().id(`space-tab-${w.id}-${g.key}`).flex_none().min_w(0)
+        .child(div().h(TAB_ROW).px(7).flex().items_center().text_size(11.5).text_color(t.dim).tooltip(tabName(g.tab))
+          .child(div().truncate().child(tabName(g.tab))))
+        .child(v_flex().ml(8).pl(5).min_w(0).border_l(1).border_color(t.border).children(g.items.map((k) => this.terminalRow(w, k, t))))))));
+  }
+
+  // Every live terminal of a space, in tab order: the ones with a pane, and the ones without
+  // (sub-agents, background shells), found by the space and tab labels herdr puts on each.
+  terminalsOf(w) {
+    const tabs = new Map((w.tabs ?? []).map((c) => [c.id, c]));
+    const local = (id) => String(id ?? "").split("/").pop();
+    const prefix = w.machine ? `${w.machine}/` : null;
+    const paneOf = new Map();
+    for (const p of panes()) if (p.terminal && tabs.has(p.tab)) paneOf.set(p.terminal, p);
+    const out = new Map();
+    for (const [terminal, p] of paneOf) out.set(terminal, { p, tab: tabs.get(p.tab) });
+    for (const x of terminals()) {
+      if (x.state !== "live" || out.has(x.address) || Boolean(prefix) !== x.address.includes("/") || (prefix && !x.address.startsWith(prefix))) continue;
+      const mine = x.labels?.["herdr.space"] ? local(x.labels["herdr.space"]) === local(w.id) : String(x.where ?? "").startsWith(`${w.name} / `);
+      if (!mine) continue;
+      const tabId = x.labels?.["herdr.tab"];
+      const tab = [...tabs.values()].find((c) => local(c.id) === local(tabId)) ?? { name: String(x.where ?? "").split(" / ").slice(1).join(" / "), named: true, index: 0 };
+      out.set(x.address, { p: { terminal: x.address, title: x.title ?? x.name ?? "", program: x.program, status: x.status ?? null, cwd: x.cwd ?? null, focused: false }, tab });
+    }
+    const list = [...out.values()].sort((a, b) => (a.tab.index ?? 0) - (b.tab.index ?? 0));
+    const many = new Set(list.map((k) => k.tab.name)).size > 1; // a tab label only says something when they differ
+    return list.map((k) => ({ ...k, many }));
+  }
+
+  // Its place and, for an agent, its task. Whether it needs you, and for how long, is the Agents list's job.
+  terminalRow(w, { p }, t) {
+    const agent = Boolean(p.program?.agent);
+    // An agent's row is its program name, then what it is working on (its title), as the Panes panel does.
+    const title = (p.title ?? "").replace(/^[^\p{L}\p{N}~/]+/u, "").trim();
+    const task = agent && title && title.toLowerCase() !== (p.program.name ?? "").toLowerCase() ? title : "";
+    const name = (agent ? p.program.name : "") || title || p.program?.name || "Terminal";
+    const here = p.focused && w.active;
+    const focus = () => { run("space.select", { id: w.id }); run("pane.focus", { terminal: p.terminal }); };
+    return h_flex().id(`term-${p.terminal}`).relative().w_full().min_w(0).h(TERM_ROW).flex_none().px(7).gap(7).items_center().rounded(5).cursor_pointer()
+      .text_size(12).text_color(here ? t.foreground : t.muted)
+      .when(here, (el) => el.bg(t.hover).child(div().absolute().left(0).top(6).bottom(6).w(2).rounded(1).bg(t.accent)))
+      .when(!here, (el) => el.hover((s) => s.bg(t.hover)).active((s) => s.bg(t.selected)))
+      .tooltip([name, p.cwd, `Address: ${p.terminal}`].filter(Boolean).join("\n"))
+      .accessibility_label(`${name}, address ${p.terminal}. Focus terminal`)
+      .on_click(() => focus())
+      // The same menu as right-clicking the terminal itself (Herdr's, or the layout's terminal_menu mod).
+      .on_mouse_down("right", () => openOverlay({ mod: "menu", kind: "popup", width: 220, height: 260, props: { tab: "pane", target: { pane: p.pane ?? null, terminal: p.terminal } } }))
+      .child(div().flex_none().max_w(96).truncate().px(5).py(1).rounded(4).bg(t.raised).text_color(t.muted)
+        .font_family(settings().font_family ?? "JetBrains Mono").text_size(11.5).font_medium().child(p.terminal))
+      .child(p.program?.icon
+        ? (p.program.tint ? svg(p.program.icon).size(13).flex_none().text_color(t.muted) : image(p.program.icon).size(13).flex_none())
+        : div().size(13).flex_none())
+      .child(div().when(!task, (el) => el.flex_1()).flex_none().min_w(0).max_w(120).truncate().child(name))
+      .when(Boolean(task), (el) => el.child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.dim).tooltip(task).child(task)));
+  }
+
+  rowBox({ w, i, g, tree }, t, { count, open, toggle }) {
     const tail = g ? this.detail(g, tree, w.name) : "";
     this.measure += rowHeight({ tree, detail: Boolean(tail) });
     const { emoji, text } = split(w.name);
@@ -454,6 +530,14 @@ export default class Spaces extends View {
           .gap(9)
           .items_center()
           .when(Boolean(tree), el => el.pl(22).child(svg("mods/studio-workspace-chrome/branch.svg").size(13).text_color(t.dim)))
+          .when(count === 0, el => el.child(div().size(16).flex_none()))
+          .when(count > 0, el => el.child(div().id(`space-toggle-${w.id}`).size(16).flex_none().flex().items_center().justify_center().rounded(4)
+            .text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground))
+            .tooltip(open ? "Hide terminals" : `Show ${count} terminal${count === 1 ? "" : "s"}`)
+            .accessibility_label(`${open ? "Hide" : "Show"} terminals of ${w.name}`)
+            // Pressing it must not start a drag or select the space underneath.
+            .on_mouse_down("left", (_e, cx) => { cx.stop_propagation(); toggle(cx); })
+            .child(svg(`mods/studio-workspace-chrome/chevron-${open ? "down" : "right"}.svg`).size(11))))
           .when(!tree, el => el.child(h_flex().size(18).flex_none().rounded(5).bg(fill).items_center().justify_center().text_size(emoji ? 12 : 10.5).font_bold().text_color("#ffffff").child(emoji ?? ([...text][0]?.toUpperCase() ?? "?"))))
           .child(v_flex().flex_1().min_w(0).gap(1)
             .child(div().truncate().text_color(t.foreground).child(text))

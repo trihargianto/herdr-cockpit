@@ -162,13 +162,6 @@
                       }
                     },
                     {
-                      "id": "panes",
-                      "type": "block",
-                      "content": {
-                        "mod": "studio-panes"
-                      }
-                    },
-                    {
                       "id": "inbox",
                       "type": "block",
                       "content": {

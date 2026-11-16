@@ -313,7 +313,6 @@ export default class Tabs extends View {
       ["projects", named("Projects"), "mods/studio-tabs/projects.svg", "Projects · jump to a project's space"],
       ["talk", named("Agent talk"), "mods/studio-tabs/talk.svg", "Agent talk · which agents message which"],
       ["automations", named("Automations"), "mods/studio-tabs/automations.svg", "Automations · scheduled cron jobs"],
-      ["panes", named("Panes"), "mods/studio-tabs/panes.svg", "Navigate all panes"],
       ["review", named("Review"), "mods/studio-workspace-chrome/git-compare.svg", "Review changes in Hunk"],
       ["usage", named("Monitoring"), "mods/studio-tabs/chart.svg", "Monitoring · limits, CPU and memory"],
       ["ports", named("Ports"), "mods/studio-tabs/plug.svg", this.servers ? `Ports · ${this.servers} ${this.servers === 1 ? "server" : "servers"} running` : "Ports and servers", this.servers ? { n: this.servers, color: t.ansi2 } : null],
@@ -327,7 +326,7 @@ export default class Tabs extends View {
     const orderedPanels = order.map(id => panels.find(p => p[0] === id));
     // Six panels keep a button; the rest sit behind the Panels menu (and Ctrl+B p on the keyboard).
     const PRIMARY = new Set(["tasks", "inbox", "mrs", "usage", "ports", "talk"]);
-    const NAMES = { projects: "Projects", talk: "Agent talk", automations: "Automations", panes: "Panes", review: "Review", usage: "Monitoring", ports: "Ports", tasks: "Tasks", inbox: "Inbox", send: "Send", mrs: "Merge requests" };
+    const NAMES = { projects: "Projects", talk: "Agent talk", automations: "Automations", review: "Review", usage: "Monitoring", ports: "Ports", tasks: "Tasks", inbox: "Inbox", send: "Send", mrs: "Merge requests" };
     const buttonPanels = orderedPanels.filter(p => PRIMARY.has(p[0]));
     const menuPanels = orderedPanels.filter(p => !PRIMARY.has(p[0]));
     const openHidden = panel && !panel.hidden ? menuPanels.find(p => p[0] === body?.active) : null;
