@@ -8,6 +8,11 @@ import { spaces, panes, theme, run, home, notify, shared, setShared, nextCommand
 import { Nav, footer } from "./nav.js";
 
 const KEY = "cockpit.projects";
+const ICONS = "mods/cockpit-workspace-chrome";
+const OWN = "mods/cockpit-projects";
+// Cards drawn at once: a view with ~120 rich cards runs out of render time. The keyboard and
+// "Show more" draw more.
+const PAGE = 60;
 const HOME = home().replace(/\/$/, "");
 
 const base = (p) => p.replace(/\/+$/, "").split("/").pop() || p;
@@ -47,6 +52,7 @@ export default class Projects extends View {
     this.showHidden = false;
     this.invalid = false;
     this.hover = null;
+    this.limit = PAGE;
 
     // Keyboard (vim-style). `sel` is the highlighted project, `cur` the highlighted folder in the tree.
     // The list view uses the shared vim keys (nav.js); the add tree keeps its own below.
@@ -66,6 +72,7 @@ export default class Projects extends View {
       if (q === this.query) return;
       this.query = q;
       this.sel = 0;
+      this.limit = PAGE;
       cx.notify();
     });
     // Enter keeps the filter and gives the list the keyboard, on the best match.
@@ -186,12 +193,18 @@ export default class Projects extends View {
 
   // ---- list view
 
-  spaceFor(path) {
+  // The spaces and panes, read once: a render asks for every project.
+  places() {
+    const all = spaces();
     const tabSpace = new Map();
-    for (const s of spaces()) for (const t of s.tabs) tabSpace.set(t.id, s.id);
+    for (const s of all) for (const t of s.tabs) tabSpace.set(t.id, s.id);
+    return { all, tabSpace, panes: panes() };
+  }
+
+  spaceFor(path, at = this.places()) {
     const hits = new Set();
-    for (const p of panes()) if (inside(p.cwd, path) && tabSpace.has(p.tab)) hits.add(tabSpace.get(p.tab));
-    const matches = spaces().filter((s) => !s.machine && hits.has(s.id));
+    for (const p of at.panes) if (inside(p.cwd, path) && at.tabSpace.has(p.tab)) hits.add(at.tabSpace.get(p.tab));
+    const matches = at.all.filter((s) => !s.machine && hits.has(s.id));
     return matches.find((s) => s.active) ?? matches[0] ?? null;
   }
 
@@ -262,6 +275,15 @@ export default class Projects extends View {
       .sort((a, b) => b.s - a.s || a.i - b.i).map((x) => x.p);
   }
 
+  // The cards drawn: the first `limit` of view(). Moving near the end draws more.
+  shown() {
+    return this.view().slice(0, this.limit);
+  }
+
+  more(total) {
+    if (this.sel >= this.limit - 5 && total > this.limit) this.limit += PAGE;
+  }
+
   // `/`: the filter field takes the keyboard. It is always on screen (a field that appears and is
   // focused in the same moment loses the keyboard), and it's focused here, not from a timer.
   search(cx) {
@@ -273,6 +295,7 @@ export default class Projects extends View {
     this.query = "";
     this.findIn.set_value("");
     this.sel = 0;
+    this.limit = PAGE;
     cx.notify();
   }
 
@@ -280,9 +303,9 @@ export default class Projects extends View {
   set sel(v) { this.nav.sel = v; }
 
   listKey(e, cx) {
-    const list = this.view();
+    let list = this.shown();
     const n = list.length;
-    const at = () => list[this.sel];
+    const at = () => (list = this.shown())[this.sel];
     // Esc with a filter on clears it first; the next Esc leaves the panel.
     if (e.key === "escape" && this.query) { this.clearSearch(cx); return true; }
     const handled = this.nav.key(e, n, {
@@ -292,8 +315,17 @@ export default class Projects extends View {
       dd: () => { if (n) { this.remove(at(), cx); this.sel = Math.min(this.sel, this.view().length - 1); } },
       "/": () => this.search(cx),
       a: () => this.openAdd(cx, true), "+": () => this.openAdd(cx, true),
+      // G is the real bottom, not the last card drawn: draw them all (5G still goes to row 5).
+      G: (_i, times) => {
+        const total = this.view().length;
+        if (!total) return;
+        const to = times > 1 ? Math.min(total, times) - 1 : total - 1;
+        this.limit = Math.max(this.limit, to + 1);
+        this.sel = to;
+      },
     }, run);
     this.sel = Math.max(0, this.sel);
+    if (handled) this.more(this.view().length);
     if (handled && n) this.listScroll.scroll_to_item(this.sel);
     return handled;
   }
@@ -334,11 +366,12 @@ export default class Projects extends View {
       // In the filter field: Esc clears it and gives the list the keyboard; the arrows, Ctrl+N/P and
       // Ctrl+J/K move through the matches without leaving the field, as in fzf.
       const k = e.keystroke;
-      const n = this.view().length;
+      const n = this.shown().length;
       if (k === "escape") { this.clearSearch(cx); this.handle.focus(); cx.stop_propagation(); return; }
       if (k === "down" || k === "ctrl-n" || k === "ctrl-j") { this.sel = Math.min(n - 1, this.sel + 1); }
       else if (k === "up" || k === "ctrl-p" || k === "ctrl-k") { this.sel = Math.max(0, this.sel - 1); }
       else return;
+      this.more(this.view().length);
       if (n) this.listScroll.scroll_to_item(this.sel);
       cx.stop_propagation();
       cx.notify();
@@ -359,93 +392,147 @@ export default class Projects extends View {
     if (handled) { cx.stop_propagation(); cx.notify(); }
   }
 
-  header(t, title, focused, right) {
-    return h_flex().flex_none().px(14).pt(14).pb(6).items_center().gap(8)
-      .child(div().font_semibold().text_size(13).text_color(focused ? t.accent : t.foreground).child(title))
+  // ---- drawing
+
+  // The panel's title line, as in Merge requests and Automations: the title turns accent while the
+  // panel has the keyboard, counts that need a look follow it in their color.
+  header(t, title, focused, counts, right) {
+    return h_flex().flex_none().h(41).px(14).pt(4).items_center().gap(8)
+      .child(div().flex_none().text_size(13).font_semibold().text_color(focused ? t.accent : t.foreground).child(title))
+      .children(counts.map(([label, color]) => div().flex_none().text_size(11.5).font_medium().text_color(color).child(label)))
       .child(div().flex_1())
       .child(right);
   }
 
-  iconButton(id, label, text, t, onClick) {
-    return div().id(id).w(22).h(22).flex().items_center().justify_center().rounded(4)
-      .cursor_pointer().text_color(t.muted).tooltip(label).accessibility_label(label)
+  // A 24px icon button in the title line.
+  iconButton(id, label, icon, t, onClick) {
+    return div().id(id).size(24).flex_none().flex().items_center().justify_center().rounded(6)
+      .cursor_pointer().text_color(t.dim).tooltip(label).accessibility_label(label)
       .hover((s) => s.bg(t.hover).text_color(t.foreground)).active((s) => s.bg(t.selected))
-      .on_click(onClick).child(text);
+      .on_click(onClick).child(svg(icon).size(13));
   }
 
-  row(path, t, cx, i, kbd) {
-    const open = Boolean(this.spaceFor(path));
+  // A quiet bordered button; with no label it's a square icon button and `tip` says what it does.
+  button(t, id, label, action, { icon = null, tip = null, danger = false, size = 22 } = {}) {
+    return h_flex().id(id).h(size).px(label ? 7 : 0).when(!label, (el) => el.w(size).justify_center()).gap(5).items_center().flex_none()
+      .rounded(size > 22 ? 6 : 5).border(1).text_size(11.5).cursor_pointer()
+      .border_color(danger ? t.blocked + "66" : t.border).bg(danger ? t.blocked + "1a" : t.chrome)
+      .text_color(danger ? t.blocked : t.muted)
+      .accessibility_label(tip ?? label).when(Boolean(tip), (el) => el.tooltip(tip))
+      .hover((s) => s.bg(danger ? t.blocked + "26" : t.hover).text_color(danger ? t.blocked : t.foreground))
+      .active((s) => s.bg(danger ? t.blocked + "33" : t.selected))
+      .on_click((_e, cx) => { cx.stop_propagation(); action(cx); })
+      .when(Boolean(icon), (el) => el.child(svg(icon).size(12).flex_none()))
+      .when(Boolean(label), (el) => el.child(label));
+  }
+
+  // The one filled button on screen. Off: a flat raised block that takes no clicks.
+  primary(t, id, label, action, { grow = false, off = false } = {}) {
+    return div().id(id).h(grow ? 30 : 26).px(12).flex().items_center().justify_center().flex_none().rounded(6)
+      .text_size(12).font_medium().when(grow, (el) => el.flex_1())
+      .bg(off ? t.raised : t.solid).text_color(off ? t.dim : t.solid_foreground).accessibility_label(label)
+      .when(!off, (el) => el.cursor_pointer().hover((s) => s.opacity(0.9)).active((s) => s.opacity(0.8))
+        .on_click((_e, cx) => { cx.stop_propagation(); action(cx); }))
+      .child(label);
+  }
+
+  chip(label, color) {
+    return div().flex_none().h(16).px(5).flex().items_center().rounded(4).bg(color + "26").text_size(10.5).font_medium().text_color(color).child(label);
+  }
+
+  // One project. Click opens its space (or a new one); Start and Remove show on hover or under the
+  // keyboard. The remove slot is always reserved so the name doesn't jump when it appears.
+  row(path, t, i, kbd, places) {
+    const open = Boolean(this.spaceFor(path, places));
     const gone = this.missing.has(path);
-    return h_flex().id(`project-${path}`).w_full().min_w(0).h(44).flex_none()
-      .px(7).gap(8).items_center().rounded(3).cursor_pointer()
-      .when((kbd || this.searching) && i === this.sel, (el) => el.bg(t.selected))
-      .hover((s) => s.bg(t.hover)).active((s) => s.bg(t.selected))
+    const on = (kbd || this.searching) && i === this.sel;
+    const hot = this.hover === path || (kbd && i === this.sel);
+    const removing = this.removing === path;
+    return h_flex().id(`project-${path}`).w_full().min_w(0).flex_none().px(10).py(8).gap(10).items_center()
+      .rounded(8).border(1).border_color(on ? t.accent : gone ? t.blocked + "55" : t.border).bg(on ? t.selected : t.chrome)
+      .cursor_pointer().hover((s) => s.bg(on ? t.selected : t.hover)).active((s) => s.bg(t.selected))
       .tooltip(gone ? `${path}\nFolder not found` : path)
-      .accessibility_label(`${base(path)}, ${abbrev(path)}${open ? ", space open" : ""}`)
-      .on_hover((on, cx2) => {
-        if (on) this.hover = path;
+      .accessibility_label(`${base(path)}, ${abbrev(path)}${open ? ", space open" : ""}${gone ? ", folder not found" : ""}`)
+      .on_hover((over, cx2) => {
+        if (over) this.hover = path;
         else if (this.hover === path) this.hover = null;
         cx2.notify();
       })
       .on_click(() => this.open(path))
-      .child(div().w(8).h(8).flex_none().rounded(4).when(open, (el) => el.bg(t.ansi2)))
+      .child(svg(`${ICONS}/folder.svg`).size(14).flex_none().text_color(gone ? t.blocked : open ? t.done : t.dim))
       .child(v_flex().flex_1().min_w(0).gap(2)
-        .child(div().truncate().text_color(gone ? t.dim : t.foreground).child(base(path)))
-        .child(div().truncate().text_size(11).text_color(t.dim).child(abbrev(path))))
-      .when(!open && !gone && (this.hover === path || (kbd && i === this.sel)), (el) => el.child(div().id(`project-start-${path}`).flex_none().h(22).px(7)
-        .flex().items_center().rounded(4).border(1).border_color(t.border).bg(t.chrome).text_size(11).text_color(t.foreground).cursor_pointer()
-        .tooltip("New space with Agent (Claude), Edit (Neovim) and Runner tabs").accessibility_label(`Start ${base(path)}: agent, editor and runner tabs`)
-        .hover((s) => s.bg(t.hover)).active((s) => s.bg(t.selected))
-        .on_click((_e, cx2) => { cx2.stop_propagation(); this.start(path, cx2); })
-        .child("Start")))
-      .child(div().flex_none().w(22).h(22)
-        .when(this.hover === path || (kbd && i === this.sel) || this.removing === path, (el) => el.child(this.iconButton(`project-x-${path}`,
-          this.removing === path ? `Click again to remove ${base(path)}` : `Remove ${base(path)}`, this.removing === path ? "?" : "×", t, (_e, cx2) => {
-          cx2.stop_propagation();
-          this.askRemove(path, cx2);
-        }))));
+        .child(div().truncate().text_size(13).font_medium().text_color(gone ? t.muted : t.foreground).child(base(path)))
+        .child(div().truncate().text_size(11.5).text_color(t.dim).child(abbrev(path))))
+      .when(gone, (el) => el.child(this.chip("Not found", t.blocked)))
+      .when(open && !hot, (el) => el.child(this.chip("Open", t.done)))
+      .when(!open && !gone && hot, (el) => el.child(this.button(t, `project-start-${path}`, "Start", (cx2) => this.start(path, cx2), {
+        icon: `${ICONS}/terminal.svg`, tip: `Start ${base(path)}: a new space with Agent (Claude), Edit (Neovim) and Runner tabs (s)` })))
+      .child(div().flex_none().h(22).when(!removing, (el) => el.w(22))
+        .when(hot || removing, (el) => el.child(this.button(t, `project-x-${path}`, removing ? "Remove?" : null, (cx2) => this.askRemove(path, cx2), {
+          icon: `${OWN}/trash.svg`, danger: removing,
+          tip: removing ? `Click again to remove ${base(path)}` : `Remove ${base(path)} (x twice, or dd)` }))));
   }
 
   renderList(t, cx) {
     const kbd = this.handle.is_focused();
-    const list = this.view();
+    const all = this.view();
+    const list = all.slice(0, this.limit);
     this.nav.clamp(list.length);
+    const places = this.places();
+    const openCount = this.list.filter((p) => this.spaceFor(p, places)).length;
+    const gone = this.list.filter((p) => this.missing.has(p)).length;
+    const counts = [];
+    if (openCount) counts.push([`${openCount} open`, t.done]);
+    if (gone) counts.push([`${gone} not found`, t.blocked]);
     // Always drawn: a field that is on screen before it's focused takes the keyboard reliably.
     const filtering = this.list.length > 0;
+    const left = all.length - list.length;
     return v_flex().size_full().min_w(0).min_h(0).bg(t.chrome).text_color(t.foreground).text_size(12.5)
-      .child(this.header(t, "Projects", kbd || this.searching, h_flex().gap(2).items_center()
-        .when(Boolean(this.query) && !this.searching, (el) => el.child(div().text_size(11).text_color(t.dim).child(`${list.length} of ${this.list.length}`)))
-        .child(this.iconButton("projects-add", "Add projects (a)", "+", t, (_e, cx) => this.openAdd(cx)))))
-      // The filter line, vim's `/`: shown while typing or while a filter is on.
-      .when(filtering, (el) => el.child(h_flex().id("projects-filter").flex_none().mx(12).mb(6).h(30).px(9).gap(6).items_center().rounded(7).border(1)
-        .border_color(this.searching ? t.accent : t.border).bg(t.background).cursor_text()
+      .child(this.header(t, "Projects", kbd || this.searching, counts, h_flex().gap(8).items_center()
+        .when(Boolean(this.query) && !this.searching, (el) => el.child(div().text_size(11).text_color(t.dim).child(`${all.length} of ${this.list.length}`)))
+        .child(this.button(t, "projects-add", "Add", (cx) => this.openAdd(cx), { icon: `${ICONS}/plus.svg`, tip: "Add projects (a)" }))))
+      // The filter line, vim's `/`.
+      .when(filtering, (el) => el.child(h_flex().id("projects-filter").flex_none().mx(10).mb(8).h(30).px(9).gap(7).items_center().rounded(6).border(1)
+        .border_color(this.searching ? t.accent : t.input).bg(t.background).cursor_text()
         .on_mouse_down("left", (_e, cx) => { cx.stop_propagation(); this.search(cx); })
-        .child(svg("mods/cockpit-workspace-chrome/search.svg").size(12).flex_none().text_color(this.searching ? t.accent : t.dim))
-        .child(div().flex_1().min_w(0).child(Input.new(this.findIn).w_full().text_size(12.5).text_color(t.foreground)))
-        .when(Boolean(this.query), (el) => el.child(div().id("projects-filter-clear").flex_none().size(18).flex().items_center().justify_center().rounded(4)
+        .child(svg(`${ICONS}/search.svg`).size(12).flex_none().text_color(this.searching ? t.accent : t.dim))
+        .child(div().flex_1().min_w(0).child(Input.new(this.findIn).w_full().text_size(12).text_color(t.foreground)))
+        .when(Boolean(this.query), (el) => el.child(div().id("projects-filter-clear").flex_none().size(20).flex().items_center().justify_center().rounded(5)
           .text_color(t.dim).cursor_pointer().tooltip("Clear filter (Esc)").accessibility_label("Clear filter")
           .hover((s) => s.bg(t.hover).text_color(t.foreground)).active((s) => s.bg(t.selected))
           .on_mouse_down("left", (_e, cx) => { cx.stop_propagation(); this.clearSearch(cx); })
-          .child("×")))))
-      .child(v_flex().id("projects-scroll").flex_1().min_h(0).px(12).pb(14).gap(2).overflow_y_scrollbar().track_scroll(this.listScroll)
-        .children(list.map((p, i) => this.row(p, t, cx, i, kbd)))
-        .when(!this.list.length, (el) => el.child(div().px(2).py(14).text_color(t.muted).child("No projects yet. Press + to add some")))
-        .when(this.list.length > 0 && !list.length, (el) => el.child(v_flex().px(2).py(14).gap(4)
-          .child(div().text_color(t.muted).child(`No project matches "${this.query.trim()}"`))
-          .child(div().text_size(12).text_color(t.dim).child("Esc clears the filter.")))))
+          .child(svg(`${ICONS}/x.svg`).size(12))))))
+      // Cards first: scroll_to_item counts children, so card i must be child i.
+      .child(v_flex().id("projects-scroll").flex_1().min_h(0).px(10).pb(12).gap(6).overflow_y_scrollbar().track_scroll(this.listScroll)
+        .children(list.map((p, i) => this.row(p, t, i, kbd, places)))
+        .when(left > 0, (el) => el.child(h_flex().py(4).justify_center()
+          .child(this.button(t, "projects-more", `Show ${Math.min(PAGE, left)} more of ${left}`, (cx) => { this.limit += PAGE; cx.notify(); }))))
+        .when(!this.list.length, (el) => el.child(v_flex().py(28).px(12).gap(8).items_center()
+          .child(svg(`${ICONS}/folder.svg`).size(20).text_color(t.dim))
+          .child(div().font_medium().text_size(13).child("No projects yet"))
+          .child(div().text_size(12).text_color(t.dim).text_center().whitespace_normal()
+            .child("Folders you work in. Click one to jump to its space, or start Agent, Edit and Runner tabs there."))
+          .child(div().mt(4).child(this.primary(t, "projects-empty-add", "Add projects", (cx) => this.openAdd(cx))))))
+        .when(this.list.length > 0 && !all.length, (el) => el.child(v_flex().px(4).py(8).gap(6)
+          .child(div().id("projects-nomatch").truncate().text_color(t.muted).tooltip(this.query.trim()).child(`No project matches "${this.query.trim()}"`))
+          .child(this.button(t, "projects-nomatch-clear", "Clear filter", (cx) => { this.clearSearch(cx); this.handle.focus(); }, { tip: "Clear filter (Esc)" }).self_start()))))
       .when(this.searching, (el) => el.child(footer({ h_flex, div }, t, [["↵", "keep filter, back to list"], ["↓ ↑ ^n ^p", "move"], ["Esc", "clear"]], false)))
       .when(kbd, (el) => el.child(footer({ h_flex, div }, t, [["/", "filter"], ["↵ o l", "open"], ["s", "start"], ["a", "add"], ["x", "remove (twice)"], ["dd", "remove now"]], this.nav.help)));
   }
 
+  // The add tree's keys, drawn like nav.js's footer (whose `?` and base keys don't apply here).
   hints(t, items) {
-    return h_flex().flex_none().px(14).py(8).gap(10).border_t(1).border_color(t.border).text_size(10.5).text_color(t.dim)
-      .children(items.map((s) => div().child(s)));
+    return h_flex().id("projects-tree-keys").flex_none().flex_wrap().px(14).py(7).gap_x(12).gap_y(4).border_t(1).border_color(t.border).bg(t.chrome)
+      .text_size(10.5).text_color(t.dim)
+      .children(items.map(([k, what], i) => h_flex().id(`projects-tree-key-${i}`).gap(4).items_center()
+        .child(div().text_color(t.muted).font_medium().child(k))
+        .child(div().child(what))));
   }
 
   check(on, disabled, t) {
-    return div().w(14).h(14).flex_none().flex().items_center().justify_center().rounded(3)
-      .border_1().border_color(on ? t.accent : t.border).when(on, (el) => el.bg(disabled ? t.dim : t.accent))
-      .text_size(10).text_color(t.chrome).child(on ? "✓" : "");
+    return div().size(14).flex_none().flex().items_center().justify_center().rounded(4).border(1)
+      .border_color(on ? (disabled ? t.dim : t.accent) : t.input).bg(on ? (disabled ? t.dim : t.accent) : t.background)
+      .when(on, (el) => el.child(svg(`${ICONS}/check.svg`).size(10).text_color(disabled ? t.chrome : t.accent_foreground)));
   }
 
   // The visible tree, flattened to rows with a depth.
@@ -467,58 +554,69 @@ export default class Projects extends View {
     return out;
   }
 
-  treeRow(r, t, cx, kbd) {
+  treeRow(r, t, kbd) {
     const indent = 6 + r.depth * 14;
     if (r.note) {
-      return div().id(`note-${r.path}-${r.depth}`).h(24).flex_none().pl(indent + 36).flex().items_center()
-        .text_size(11).text_color(t.dim).child(r.note);
+      return div().id(`note-${r.path}-${r.depth}`).h(26).flex_none().pl(indent + 42).flex().items_center()
+        .text_size(11.5).text_color(r.note === "Can't read this folder" ? t.blocked : t.dim).child(r.note);
     }
     const already = this.list.includes(r.path);
     const on = already || this.ticked.has(r.path);
     const open = this.expanded.has(r.path);
-    return h_flex().id(`node-${r.path}`).w_full().min_w(0).h(28).flex_none().pl(indent).pr(6).gap(4).items_center()
-      .rounded(3).cursor_pointer().when(kbd && r.path === this.cur, (el) => el.bg(t.selected)).hover((s) => s.bg(t.hover))
-      .accessibility_label(`${r.name}${open ? ", expanded" : ""}${already ? ", already added" : ""}`)
+    const cur = kbd && r.path === this.cur;
+    return h_flex().id(`node-${r.path}`).w_full().min_w(0).h(28).flex_none().pl(indent).pr(8).gap(6).items_center()
+      .rounded(6).cursor_pointer().when(cur, (el) => el.bg(t.selected)).hover((s) => s.bg(cur ? t.selected : t.hover)).active((s) => s.bg(t.selected))
+      .accessibility_label(`${r.name}${open ? ", expanded" : ", collapsed"}${already ? ", already added" : on ? ", ticked" : ""}`)
       .on_click((_e, cx) => this.expandToggle(r.path, cx))
-      .child(div().w(16).flex_none().flex().items_center().justify_center().text_color(t.muted).text_size(11)
-        .child(open ? "▾" : "▸"))
-      .child(div().id(`tick-${r.path}`).w(20).h(20).flex_none().flex().items_center().justify_center()
-        .when(!already, (el) => el.cursor_pointer())
+      .child(svg(`${ICONS}/${open ? "chevron-down" : "chevron-right"}.svg`).size(12).flex_none().text_color(t.dim))
+      .child(div().id(`tick-${r.path}`).size(20).flex_none().flex().items_center().justify_center().rounded(4)
         .tooltip(already ? "Already in Projects" : on ? "Untick" : "Add as a project")
+        .accessibility_label(already ? `${r.name} is already in Projects` : on ? `Untick ${r.name}` : `Tick ${r.name} to add it`)
+        .when(!already, (el) => el.cursor_pointer().hover((s) => s.bg(t.hover)).active((s) => s.bg(t.selected)))
         .on_click((_e, cx2) => {
           cx2.stop_propagation();
           this.toggle(r.path, cx2);
         })
         .child(this.check(on, already, t)))
-      .child(div().flex_1().min_w(0).truncate().text_color(already ? t.dim : t.foreground).tooltip(r.path).child(r.name));
+      .child(svg(`${ICONS}/folder.svg`).size(13).flex_none().text_color(on && !already ? t.accent : t.dim))
+      .child(div().id(`node-name-${r.path}`).flex_1().min_w(0).truncate().text_color(already ? t.dim : t.foreground)
+        .when(r.depth === 0, (el) => el.font_medium()).tooltip(r.path).child(r.name))
+      .when(already, (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).child("Added")));
   }
 
   renderAdd(t, cx) {
     const n = this.ticked.size;
     const kbd = this.handle.is_focused();
     const atTop = this.root === "/";
+    const cancel = (_e, cx) => { this.adding = false; this.handle.focus(); cx.notify(); };
     return v_flex().size_full().min_w(0).min_h(0).bg(t.chrome).text_color(t.foreground).text_size(12.5)
-      .child(this.header(t, "Add projects", false, this.iconButton("projects-cancel", "Cancel", "×", t, (_e, cx) => { this.adding = false; cx.notify(); })))
-      .child(v_flex().flex_none().px(12).pb(8).gap(4)
-        .child(h_flex().gap(4).items_center()
-          .child(this.iconButton("projects-up", "Up one folder", "↑", t, (_e, cx) => { if (!atTop) this.jump(parent(this.root), cx); }))
-          .child(div().flex_1().min_w(0).child(Input.new(this.pathIn).w_full().text_size(12.5).text_color(t.foreground).on_mouse_down("left", (_e, cx) => cx.stop_propagation())))
-          .child(this.iconButton("projects-home", "Home", "~", t, (_e, cx) => this.jump(HOME, cx))))
+      .child(this.header(t, "Add projects", kbd || this.typing, n ? [[`${n} ticked`, t.accent]] : [],
+        this.iconButton("projects-cancel", "Cancel (Esc)", `${ICONS}/x.svg`, t, cancel)))
+      .child(v_flex().flex_none().px(10).pb(8).gap(8)
+        .child(h_flex().gap(6).items_center()
+          .child(this.button(t, "projects-up", null, (cx) => { if (!atTop) this.jump(parent(this.root), cx); }, { icon: `${OWN}/arrow-up.svg`, tip: "Up one folder (-)", size: 30 }))
+          // The box is the field: a press on it focuses the input and stays away from the panel root,
+          // which would take the keyboard (an Input's own on_mouse_down isn't wired).
+          .child(div().id("projects-path").flex_1().min_w(0).h(30).px(9).flex().items_center().rounded(6).border(1)
+            .border_color(this.invalid ? t.blocked : this.typing ? t.accent : t.input).bg(t.background).cursor_text()
+            .on_mouse_down("left", (_e, cx) => { cx.stop_propagation(); this.pathIn.focus(); })
+            .child(Input.new(this.pathIn).w_full().text_size(12).text_color(t.foreground).font_family(settings().font_family ?? "JetBrains Mono")))
+          .child(this.button(t, "projects-home", null, (cx) => this.jump(HOME, cx), { icon: `${OWN}/house.svg`, tip: "Home (~)", size: 30 })))
         .child(h_flex().items_center().gap(8)
-          .child(div().flex_1().text_size(11).text_color(this.invalid ? t.ansi1 : t.dim)
-            .child(this.invalid ? "Not a folder" : "Expand folders with the arrow, tick to add"))
-          .child(div().id("projects-hidden").px(6).h(20).flex().items_center().rounded(4).cursor_pointer().text_size(11)
-            .text_color(this.showHidden ? t.foreground : t.dim).hover((s) => s.bg(t.hover))
+          .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(this.invalid ? t.blocked : t.dim)
+            .child(this.invalid ? "Not a folder" : "Open folders with the arrow, tick the ones to add"))
+          .child(h_flex().id("projects-hidden").h(24).px(8).gap(5).items_center().flex_none().rounded(6).text_size(11.5)
+            .border(1).border_color(this.showHidden ? t.accent : t.border).bg(this.showHidden ? t.selected : t.chrome)
+            .text_color(this.showHidden ? t.foreground : t.muted).cursor_pointer()
+            .tooltip("Show folders that start with a dot (.)").accessibility_label(`Hidden folders, ${this.showHidden ? "shown" : "hidden"}`)
+            .hover((s) => s.bg(this.showHidden ? t.selected : t.hover)).active((s) => s.bg(t.selected))
             .on_click((_e, cx) => { this.showHidden = !this.showHidden; cx.notify(); })
-            .child(this.showHidden ? "Hidden: shown" : "Hidden: off"))))
+            .child("Hidden folders"))))
       .child(v_flex().id("projects-tree").flex_1().min_h(0).px(8).gap(1).overflow_y_scrollbar().track_scroll(this.treeScroll)
-        .children(this.flat().map((r) => this.treeRow(r, t, cx, kbd))))
-      .when(kbd, (el) => el.child(this.hints(t, ["j k move", "l h open/close", "␣ tick", "↵ add", "/ path", "- up", "Esc cancel"])))
-      .child(h_flex().flex_none().p(12).child(
-        div().id("projects-confirm").flex_1().h(30).flex().items_center().justify_center().rounded(5)
-          .bg(n ? t.accent : t.raised).text_color(n ? t.chrome : t.dim).font_semibold()
-          .when(n > 0, (el) => el.cursor_pointer().on_click((_e, cx) => this.confirmAdd(cx)))
-          .child(n ? `Add ${n} ${n === 1 ? "project" : "projects"}` : "Add projects")));
+        .children(this.flat().map((r) => this.treeRow(r, t, kbd))))
+      .when(kbd, (el) => el.child(this.hints(t, [["j k", "move"], ["l h", "open, close"], ["␣", "tick"], ["↵", "add"], ["/", "path"], ["-", "up"], ["Esc", "cancel"]])))
+      .child(h_flex().flex_none().px(10).py(10).border_t(1).border_color(t.border).child(
+        this.primary(t, "projects-confirm", n ? `Add ${n} ${n === 1 ? "project" : "projects"}` : "Tick folders to add", (cx) => this.confirmAdd(cx), { grow: true, off: !n })));
   }
 
   render(cx) {
