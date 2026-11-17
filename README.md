@@ -1,13 +1,32 @@
 # Herdr Studio
 
-A personal layout for the [Herdr](https://herdr.dev) desktop app, set up as a cockpit for working with
-coding agents: a sidebar with spaces and an agent dashboard, a Home panel that says what needs you now,
-alerts for merge requests and pipelines, and side panes for tasks, messages, merge requests, ports,
-usage and diff review. Two panes can show at once, one above the other.
+You run five coding agents at once. One is stuck on a question, one finished ten minutes ago, and a
+pipeline just failed. Which one do you look at first?
 
-It is made of one layout (`layouts/studio.json`) and a set of mods (`mods/studio-*`), all written
-for Herdr's native UI toolkit. A small script, `dev.py`, checks them and copies them into Herdr's
-config folder.
+Herdr Studio is a layout for the [Herdr](https://herdr.dev) desktop app that answers that. It turns
+Herdr into a cockpit for agent work: a sidebar with your spaces and agents, a Home panel that says what
+needs you now, alerts for merge requests and pipelines, and side panes for tasks, messages, MRs, ports,
+usage and diff review.
+
+![The Studio layout](layouts/studio.svg)
+
+It's one layout (`layouts/studio.json`) and a set of mods (`mods/studio-*`), written for Herdr's native
+UI toolkit. A small script, `dev.py`, checks them and copies them into Herdr's config folder.
+
+**It started as one person's setup**, built on macOS around GitLab and Jira. Everything else is optional:
+a pane whose tool is missing says so and the rest keeps working.
+
+## Quick start
+
+```sh
+git clone git@github.com:trihargianto/herdr-studio.git
+cd herdr-studio
+cp config.example.json config.json   # then set your Jira site, or leave it
+python3 dev.py
+```
+
+Herdr switches to the Studio layout. Leave `dev.py` running if you want to edit the mods; stop it
+with `Ctrl-C` and the layout stays. Check [Requirements](#requirements) first if anything fails.
 
 ## What you get
 
@@ -67,7 +86,9 @@ and a footer lists its keys; `?` shows them all. The shared rules live in `nav.j
 The tab bar polls GitLab every 3 minutes, also while Herdr is in the background, and tells you when one
 of your pipelines fails or passes, an MR of yours is approved or gets comments, or someone asks for your
 review. In Herdr it is a toast (click it for the MRs pane); with the window in the background it is also
-a macOS notification, and a failed pipeline plays Herdr's "needs you" sound. The first poll after a
+a macOS notification, and a failed pipeline plays Herdr's "needs you" sound. Install `terminal-notifier`
+so that clicking the macOS notification opens Herdr: without it the notification is posted by
+`osascript`, and macOS opens Script Editor on click. The first poll after a
 start only sets the baseline, so nothing old is announced. Quiet mode (`Ctrl+B q` or the bell on Home)
 keeps only the Dock badge. Agents that need you are left to Herdr's own alerts.
 
@@ -105,42 +126,83 @@ group, and `?` lists every shortcut. Pressing `Ctrl+B` twice sends a real `Ctrl+
 
 ## Requirements
 
-- **Herdr** (the desktop app) with its `herdr-app` command on your `PATH`. Run `herdr-app status` to check.
-- **Python 3** to run `dev.py`.
-- **macOS.** Ports uses `lsof` and `ps`; the rest is portable, but it has only been tried on macOS.
+Here's what you need before `dev.py` will run:
 
-Optional, each for one pane:
+| Need | Why | Check |
+| --- | --- | --- |
+| **macOS** | Ports, Monitoring and the status bar use `lsof`, `ps`, `vm_stat` and `sysctl`. Other platforms are untested. | |
+| **Herdr** desktop app, opened once (built and tested on 0.1.16) | The layout and mods run inside it | `herdr-app status` |
+| `herdr-app` and `hc` on your `PATH` | `dev.py` publishes with `herdr-app`; most panes read agents and terminals with `hc` (Herdr Core). Both come with Herdr. | `which herdr-app hc` |
+| **Python 3.8+** | Runs `dev.py` | `python3 --version` |
+| `git` | Branch labels in Spaces, repo detection, the Review pane | `git --version` |
 
-| Tool | Needed for |
-| --- | --- |
-| `glab` ([GitLab CLI](https://gitlab.com/gitlab-org/cli)), signed in with `glab auth login` | the **MRs** pane and its counter |
-| `hunk` ([hunk.dev](https://www.hunk.dev/)) | the **Review** pane |
-| `nvim` | the **Neovim** button and Projects' Edit tab |
-| `claude` | Projects' Agent tab |
-| `git` | **Review**, spaces' branch labels, repo-root detection |
-| Claude Code with a status line that prints `Context … Usage … Weekly …`, and/or Codex | numbers in the **Usage** pane |
+**Optional.** Each one lights up a pane or a feature. Leave out what you don't use:
 
-A pane whose tool is missing shows a short message instead of data. Nothing else breaks.
+| Tool | Gives you | Install |
+| --- | --- | --- |
+| `glab`, signed in | The **MRs** pane, MR and pipeline alerts, merged MRs on Home | `brew install glab`, then `glab auth login` |
+| `terminal-notifier` | macOS notifications that open Herdr when clicked | `brew install terminal-notifier` |
+| `hunk` | The **Review** pane | [hunk.dev](https://www.hunk.dev/) |
+| `nvim` | The **Neovim** button and the Edit tab of a new project | `brew install neovim` |
+| `claude` (Claude Code) | The Agent tab of a new project, limits in **Monitoring** and the status bar | [claude.com/claude-code](https://claude.com/claude-code) |
+| Codex | Its limits in **Monitoring** | |
+| `crontab` | The **Automations** pane (built into macOS) | `crontab -l` |
+| A Jira site | Jira keys in tasks become links | set `jiraUrl` in `config.json` |
+| Node.js 18+ | Only to run the tests | `node --version` |
+
+**Monitoring reads limits from the agent's screen.** It needs Claude Code's status line to print
+`Context … Usage … Weekly …`. With a different status line the limits stay empty; everything else works.
 
 ## Install
+
+### 1. Get the code
 
 ```sh
 git clone git@github.com:trihargianto/herdr-studio.git
 cd herdr-studio
+```
+
+### 2. Add your settings
+
+```sh
+cp config.example.json config.json
+```
+
+`config.json` is git-ignored, so your settings stay yours:
+
+```json
+{
+  "jiraUrl": "https://your-team.atlassian.net"
+}
+```
+
+`jiraUrl` is your Jira site, without `/browse`. Remove the line, or skip the file, if you don't use
+Jira: keys like `ABC-123` still show on tasks, just without a link.
+
+### 3. Publish
+
+```sh
 python3 dev.py
 ```
 
 `dev.py`:
 1. runs `herdr-app check` on every mod that changed, and refuses to publish one that fails;
-2. copies `layouts/` and `mods/` into `~/.config/herdr-app/`;
-3. switches Herdr to the `studio` layout;
-4. keeps watching the folder and republishes whenever you save a file.
+2. copies `layouts/`, `mods/` and your `config.json` into `~/.config/herdr-app/`;
+3. merges `keybindings.json` into Herdr's `keys.json` (only the keys listed there);
+4. switches Herdr to the `studio` layout;
+5. keeps watching the folder and republishes whenever you save a file.
 
-Leave it running while you edit. Press `Ctrl-C` to stop watching: the layout stays installed.
-To publish once and exit, run `python3 dev.py --once`.
+Press `Ctrl-C` to stop watching: the layout stays installed. To publish once and exit, run
+`python3 dev.py --once`.
 
-`dev.py` only touches the files it records in `.published.json`. It will not overwrite a file in
-Herdr's config folder that it did not put there, and it stops with a message if one is in the way.
+**`dev.py` never overwrites a file it didn't put there.** It records what it published in
+`.published.json`, and stops with a message if another file is in the way.
+
+### 4. First look
+
+- Open **Home** with `Cmd+Shift+H`: what needs you now.
+- Press `Ctrl+B` then `?` for every shortcut.
+- If you use GitLab, MRs show up on the next poll (every 3 minutes), or at once with `r` in the MRs pane.
 
 ## Configure
 
@@ -152,9 +214,12 @@ are the children of the `panel-body` stack. The lower half is the `panel-lower` 
 you open a pane there; its blocks are second copies of five read-only panes (Home, Inbox, MRs, Ports, Monitoring), with
 `"props": { "slot": "lower" }`. Tasks is left out: two copies would save over each other.
 
-**Jira.** Work items link to `https://mamikos.atlassian.net/browse/<KEY>`; change `JIRA` in
-`mods/studio-home/work.js` and its copy in `mods/studio-tasks/work.js`. Keys are upper case
-(`CFE-1880`), in a task's title, a Jira link, or a branch name.
+**Jira.** Set `jiraUrl` in `config.json` (see [Install](#2-add-your-settings)); `dev.py` publishes it to
+`~/.config/herdr-app/studio/config.json`, where Home and Tasks read it when they start. Keys are upper
+case (`ABC-123`), found in a task's title, a Jira link, or a branch name.
+
+**Shortcuts.** `keybindings.json` holds the Studio keys; edit it and `dev.py` merges the change into
+Herdr's `keys.json`.
 
 **Colours and fonts.** These come from your Herdr theme (Settings in Herdr, or `settings.json`). The
 mods only use theme colours, so a different theme changes everything.
@@ -171,12 +236,22 @@ real bindings.
 | Briefs sent to agents | `~/.config/herdr-app/studio-tasks/briefs/` |
 | Small per-pane settings (Space or All, folded sections, where Hunk opens) | each pane's own local storage, inside Herdr |
 
-**Polling.** Side panes refresh only while they are the pane shown, and only while the Herdr window
-is in front. The tab bar runs the rest, in `mods/studio-tabs/feed.js`, and shares what it finds with
-the other mods (`studio.mrs`, `studio.limits`, `studio.next`, `studio.errors`): merge requests every
-3 minutes (also in the background, for alerts), limits every minute (two `hc read`s), the crontab every
-5 minutes and `herdr-app status` every minute. Ports are counted every 15 s and tasks every 5 s. The
-intervals are constants at the top of `feed.js` and in the tab bar's `init`.
+**Polling.** Every redraw repaints the whole Herdr window, so the mods poll gently. Side panes refresh
+only while they are the pane shown, and mostly only while the Herdr window is in front. The tab bar
+runs the rest, in `mods/studio-tabs/feed.js`, and shares what it finds with the other mods
+(`studio.mrs`, `studio.limits`, `studio.next`, `studio.errors`):
+
+| What | How often |
+| --- | --- |
+| Merge requests (`glab`, at most 4 at once) | every 3 minutes, also in the background for alerts; every 2 minutes while the MRs pane is shown |
+| Claude and Codex limits (`hc read`) | every minute |
+| Crontab | every 5 minutes |
+| `herdr-app status` | every minute |
+| Ports counter (`lsof`) | every 30 s; while the Ports pane is shown, the pane's own scan is reused |
+| Tasks counter | every 5 s |
+| CPU and memory in the status bar (`ps`, `vm_stat`) | every 5 s, window in front |
+
+The intervals are constants at the top of `feed.js` and in each mod's `init`.
 
 ## How the panes find your repo
 
@@ -198,8 +273,10 @@ terminal list and a space's stored folder only record where something started, s
 | `mods/studio-leader`, `studio-picker`, `studio-panel-menu` | `Ctrl+B` leader, `Cmd+P` switcher, the Panels menu |
 | `mods/studio-inbox`, `studio-tasks`, `studio-mrs`, `studio-projects`, `studio-usage`, `studio-ports`, `studio-review`, `studio-talk`, `studio-automations` | The other side panes |
 | `mods/agenttrail` | The Agenttrail Map. Not used by the layout; Agent talk borrows its look. |
-| `tests/` | `node --test tests/feedlib.test.mjs` (feed and work-item helpers), `python3 -m unittest tests/test_automations.py` |
-| `dev.py` | Checks and publishes to Herdr, and watches for edits |
+| `tests/` | Unit tests for the feed, work items, the task report and Automations |
+| `dev.py` | Checks and publishes to Herdr, watches for edits, and uninstalls |
+| `config.example.json` | The settings template; copy it to `config.json` |
+| `keybindings.json` | Studio's shortcuts, merged into Herdr's `keys.json` |
 | `AGENTS.md`, `DESIGN.md` | Notes for coding agents and the design rules used here |
 
 Herdr writes `gpui-kit.d.ts` and `jsconfig.json` into every mod folder so editors can complete the
@@ -216,6 +293,30 @@ API. They are generated, so they are not in git.
 Note that `herdr-app check` renders only a mod's first, empty state. A mod can pass it and still
 fail once real data arrives, so open the pane in Herdr after changing it.
 
+Run the tests (no Herdr needed):
+
+```sh
+node --test tests/*.mjs
+python3 -m unittest tests/test_automations.py
+```
+
+`nav.js` is copied into every mod that uses it (mods can't import each other), and `work.js` into Home
+and Tasks. Edit one copy, copy it to the others; a test fails if they differ.
+
+## Troubleshooting
+
+| You see | Do this |
+| --- | --- |
+| `herdr-app isn't on your PATH` | Open Herdr once, then check `which herdr-app`. It lives in `~/.local/bin`; add that to your `PATH`. |
+| `Conflicting file; preserve or move it first` | A file `dev.py` wants to write already exists in `~/.config/herdr-app/` and isn't one it published. Move it away, or keep it and delete the matching file here. |
+| `Not published: ... check ...` | A mod failed `herdr-app check`. The error names the line. The last good version keeps running. |
+| A pane says "This view could not be re-rendered" | Run `herdr-app status` for the error, then fix and save. |
+| MRs says `glab` isn't installed or signed in | `brew install glab`, then `glab auth login`. |
+| Clicking a macOS notification opens Script Editor | `brew install terminal-notifier`. |
+| Jira keys aren't links | Set `jiraUrl` in `config.json` and restart `dev.py` (it publishes `config.json` at start and on save). |
+| Monitoring shows no limits | Claude Code's status line must print `Context … Usage … Weekly …`. |
+| Spaces keeps asking about a machine | `herdr-app status` lists unreachable machines; remove or fold the ones you no longer use. |
+
 ## Switch back or uninstall
 
 Return to Herdr's own layout at any time:
@@ -224,16 +325,28 @@ Return to Herdr's own layout at any time:
 herdr-app do layout.switch '{"name":"main"}'
 ```
 
-To remove Studio completely, stop `dev.py`, then delete the files listed in `.published.json` from
-`~/.config/herdr-app/` (the `studio` layout and the `studio-*` mod folders). Your tasks stay in
-`~/.config/herdr-app/studio-tasks/` unless you delete that too.
+To remove Studio completely, stop `dev.py`, then run:
+
+```sh
+python3 dev.py --uninstall
+```
+
+It switches Herdr back to its own layout, deletes what it published (the `studio` layout, the
+`studio-*` mods, your published `config.json`) and takes its shortcuts out of `keys.json`. A file you
+changed inside Herdr since is kept, and listed. Your tasks stay in `~/.config/herdr-app/studio-tasks/`
+unless you delete that folder too.
 
 ## Back up
 
-The whole theme is this repository. Your tasks live outside it, in
+The whole layout is this repository, plus your `config.json`. Your tasks live outside it, in
 `~/.config/herdr-app/studio-tasks/`, so copy that folder separately if you want them kept.
+
+**Takeaway:** clone, copy `config.json`, run `python3 dev.py`. Add `glab` and `terminal-notifier` when
+you want MRs and alerts.
 
 ## Credits and licence
 
-Several mods (spaces, tabs, pane header, chrome, status bar) began as copies of Herdr's shipped mods
-and were reworked, so they carry Herdr's design. No licence is set for this repository yet.
+[MIT](LICENSE), with one exception. The layout and five mods (spaces, tabs, pane header, chrome,
+status bar) began as copies of Herdr's shipped mods, which are under the
+[Apache License 2.0](LICENSES/Apache-2.0.txt). Their Herdr-derived parts stay under that licence.
+[NOTICE](NOTICE) lists which files they are.
