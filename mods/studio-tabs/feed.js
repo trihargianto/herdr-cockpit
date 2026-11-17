@@ -37,6 +37,24 @@ async function glab(args) {
   }
 }
 
+// A macOS notification whose click brings Herdr to the front on the MRs panel. macOS hands a click
+// to the app that posted the notification, so `osascript` ones open Script Editor: `terminal-notifier`
+// (`brew install terminal-notifier`) posts it and, on click, activates Herdr and runs the command.
+// Without it, the osascript banner still says what happened.
+async function systemNotify(title, body) {
+  const opts = { cwd: home(), timeout: 5000 };
+  try {
+    const r = await exec("terminal-notifier", [
+      "-title", "Herdr Studio", "-subtitle", title, "-message", body,
+      "-activate", "dev.herdr.app",
+      "-execute", `'${home()}/.local/bin/herdr-app' do studio-tabs.panel`,
+    ], opts);
+    if (r.code === 0) return;
+  } catch {}
+  const esc = (s) => String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  exec("osascript", ["-e", `display notification "${esc(body)}" with title "Herdr Studio" subtitle "${esc(title)}"`], opts).catch(() => {});
+}
+
 // Only what the panes need, so shared.json stays small.
 function compact(m, extra = {}) {
   const ref = m.references?.full ?? `!${m.iid}`;
@@ -177,10 +195,7 @@ export class Feed {
     for (const e of events.slice(0, 4)) {
       const { title, body, level } = eventText(e);
       notify({ title, body, level, timeout: e.kind === "failed" ? 12000 : 6000, action: { name: "studio-tabs.panel", args: {} } });
-      if (away) {
-        const esc = (s) => String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-        exec("osascript", ["-e", `display notification "${esc(body)}" with title "Herdr Studio" subtitle "${esc(title)}"`], { cwd: home(), timeout: 5000 }).catch(() => {});
-      }
+      if (away) systemNotify(title, body);
     }
     if (away && events.some((e) => e.kind === "failed")) playSound("blocked");
   }
