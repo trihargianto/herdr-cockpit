@@ -167,6 +167,7 @@ export default class AgentTalk extends View {
   }
 
   save() {
+    this.dirty = true;
     try { window.sessionStorage.setItem(STORE, JSON.stringify({ events: this.events, keys: [...this.keys].slice(-2000) })); } catch {}
   }
 
@@ -175,6 +176,7 @@ export default class AgentTalk extends View {
     if (win()?.active === false && !watching()) return;
     this.scanning = true;
     const live = watching();
+    this.dirty = false;
     cx.spawn(async (cx) => {
       try {
         for (const a of agents()) {
@@ -188,7 +190,8 @@ export default class AgentTalk extends View {
       } catch {}
       this.scanning = false;
       this.launch(cx);
-      cx.notify();
+      // Each redraw repaints the whole window: only when there are new messages.
+      if (this.dirty) cx.notify();
     });
   }
 

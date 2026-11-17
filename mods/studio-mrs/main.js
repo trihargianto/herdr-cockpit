@@ -1,6 +1,6 @@
 // Merge requests you opened and ones waiting for your review, with pipeline state.
-// Runs `glab api` (read-only GETs every two minutes while the window is in front,
-// plus one POST when you press Retry). Nothing else leaves the machine.
+// The list comes from the tab bar's feed (shared "studio.mrs"), which this pane asks to look again
+// every two minutes while it is shown. Its own `glab api` call is the one POST when you press Retry.
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, ScrollHandle } from "gpui-base";
@@ -8,9 +8,6 @@ import { exec, home, theme, window, settings, layout, props, shared, run, nextCo
 import { Nav, footer } from "./nav.js";
 
 const ICONS = "mods/studio-workspace-chrome";
-const MINE = "merge_requests?scope=created_by_me&state=opened&per_page=20";
-const reviewing = (username) => `merge_requests?scope=all&state=opened&reviewer_username=${encodeURIComponent(username)}&per_page=20`;
-const DETAIL_LIMIT = 12;
 
 function ago(ms) {
   const m = Math.floor(ms / 60000);
@@ -18,6 +15,12 @@ function ago(ms) {
   if (m < 60) return `${m}m`;
   const h = Math.floor(m / 60);
   return h < 24 ? `${h}h` : `${Math.floor(h / 24)}d`;
+}
+
+// What to tell the person about a failure: "missing" (not installed), "auth" (not signed in) or "other".
+function errorKind(text) {
+  return /isn't installed|command not found|not found/i.test(text) ? "missing"
+    : /401|unauthori[sz]ed|not logged in|log ?in|auth|token/i.test(text) ? "auth" : "other";
 }
 
 // Errors carry a `kind` so the pane can say what to do: "missing" (not installed), "auth" (not
@@ -42,8 +45,7 @@ async function glab(args) {
   return r.stdout;
 }
 
-// The tab bar's feed (shared "studio.mrs") in the shape the cards read, so the pane shows at once
-// when it opens; its own fetch then fills in the rest.
+// The tab bar's feed (shared "studio.mrs") in the shape the cards read.
 function fromFeed(m) {
   return {
     id: m.id, iid: m.iid, project_id: m.project, title: m.title, draft: m.draft,
@@ -94,20 +96,16 @@ function shown(id) {
 
 export default class Mrs extends View {
   init(_props, cx) {
-    this.items = null; // opened by you
-    this.reviews = null; // waiting for your review
     this.me = null;
-    this.error = null;
     this.loading = false;
-    this.at = null;
+    this.asked = 0; // when this pane last asked the feed to look
     this.retrying = new Set();
     this.copied = null; // the MR whose link was just copied
     this.filtering = false; // the filter row is open
     this.filter = null; // one of FILTERS, or all
     this.hideDrafts = false;
-    this.last = 0;
     this.redrawn = 0;
-    // Keyboard: the cards in screen order (`rows`, rebuilt on each render; `items` is your MRs).
+    // Keyboard: the cards in screen order (`rows`, rebuilt on each render).
     this.nav = new Nav(cx, { slot: props()?.slot ?? null });
     this.nav.watch(cx);
     this.scroll = ScrollHandle.new();
@@ -118,12 +116,15 @@ export default class Mrs extends View {
         if (this.nav.wants(c, props()?.slot)) { this.nav.focus(); cx.notify(); }
       }
     });
-    // Looks every two minutes, but only while this pane is the one shown (and at once when it opens).
-    // A redraw every 30 seconds keeps "5m ago" honest.
+    // The list is the tab bar's feed (shared "studio.mrs"); this pane fetches nothing itself. While it is
+    // the one shown, it asks the feed for a fresh look when the data is two minutes old (at once on
+    // opening). A redraw every 30 seconds keeps "5m ago" honest.
     cx.timer.every(3000, (cx) => {
       if (!shown("mrs")) return;
       const now = Date.now();
-      if (window()?.active && now - this.last > 120000) this.refresh(cx);
+      if (this.loading && now - this.asked > 40000) { this.loading = false; cx.notify(); }
+      const at = shared("studio.mrs")?.at ?? 0;
+      if (window()?.active && !this.loading && now - Math.max(at, this.asked) > 120000) this.refresh(cx);
       else if (now - this.redrawn > 30000) {
         this.redrawn = now;
         cx.notify();
@@ -131,53 +132,12 @@ export default class Mrs extends View {
     });
   }
 
-  // The first few get their own record: the list has no pipeline in it.
-  async detail(list, extra) {
-    return Promise.all(list.slice(0, DETAIL_LIMIT).map(async (m) => {
-      try {
-        const full = JSON.parse(await glab(["api", `projects/${m.project_id}/merge_requests/${m.iid}`]));
-        return extra ? await extra(full) : full;
-      } catch {
-        return m;
-      }
-    }));
-  }
-
   refresh(cx) {
     if (this.loading) return;
     this.loading = true;
-    this.last = Date.now();
+    this.asked = Date.now();
+    run("studio-tabs.refresh-mrs");
     cx.notify();
-    cx.spawn(async (cx) => {
-      try {
-        this.me ??= JSON.parse(await glab(["api", "user"])).username;
-        const [mine, asked] = await Promise.all([glab(["api", MINE]), glab(["api", reviewing(this.me)])]);
-        const mineList = JSON.parse(mine);
-        // Others' MRs that name you as reviewer; yours are in the other list.
-        const askedList = JSON.parse(asked).filter((m) => m.author?.username !== this.me);
-        const [own, theirs] = await Promise.all([
-          this.detail(mineList),
-          this.detail(askedList, async (m) => {
-            // Whether you already approved it.
-            let approved = false;
-            try {
-              const a = JSON.parse(await glab(["api", `projects/${m.project_id}/merge_requests/${m.iid}/approvals`]));
-              approved = (a.approved_by ?? []).some((x) => x.user?.username === this.me);
-            } catch {}
-            return { ...m, approvedByMe: approved };
-          }),
-        ]);
-        this.items = [...own, ...mineList.slice(DETAIL_LIMIT)];
-        this.reviews = [...theirs, ...askedList.slice(DETAIL_LIMIT)];
-        this.error = null;
-        this.at = Date.now();
-      } catch (e) {
-        this.error = String(e.message ?? e);
-        this.errorKind = e.kind ?? "other";
-      }
-      this.loading = false;
-      cx.notify();
-    });
   }
 
   retry(m, cx) {
@@ -195,9 +155,8 @@ export default class Mrs extends View {
       }
       this.retrying.delete(id);
       this.loading = false;
+      // The feed looks again; Home, the badge and the status bar follow it.
       this.refresh(cx);
-      // Home, the badge and the status bar follow the feed.
-      run("studio-tabs.refresh");
     });
   }
 
@@ -283,7 +242,7 @@ export default class Mrs extends View {
         const theirs = m?.author?.username && m.author.username !== this.me;
         if (m && m.head_pipeline?.status === "failed" && !theirs) this.retry(m, cx);
       },
-      r: () => { this.refresh(cx); run("studio-tabs.refresh"); },
+      r: () => this.refresh(cx),
       f: () => { this.filtering = !this.filtering; },
       D: () => { this.hideDrafts = !this.hideDrafts; },
     }, run);
@@ -333,8 +292,13 @@ export default class Mrs extends View {
     const order = (list) => [...(list ?? [])].sort((a, b) => rank(a) - rank(b) || Date.parse(b.updated_at) - Date.parse(a.updated_at));
     const feed = shared("studio.mrs");
     this.me ??= feed?.me ?? null;
-    const items = this.items ?? (feed?.mine ? feed.mine.map(fromFeed) : null);
-    const reviewsList = this.reviews ?? (feed?.reviews ? feed.reviews.map(fromFeed) : null);
+    const items = feed?.mine ? feed.mine.map(fromFeed) : null;
+    const reviewsList = feed?.reviews ? feed.reviews.map(fromFeed) : null;
+    this.at = feed?.at ?? null;
+    this.error = feed?.error ?? null;
+    this.errorKind = this.error ? errorKind(this.error) : null;
+    // The feed answered what this pane asked (a forced publish), or failed.
+    if (this.loading && ((this.at ?? 0) >= this.asked || this.error)) this.loading = false;
     const allMine = order(items);
     // Ones you haven't approved yet come first.
     const allReviews = order(reviewsList).sort((a, b) => Number(Boolean(a.approvedByMe)) - Number(Boolean(b.approvedByMe)));
@@ -387,7 +351,7 @@ export default class Mrs extends View {
         .child(div().id("mr-refresh").size(24).flex_none().flex().items_center().justify_center().rounded(6).text_color(t.dim)
           .tooltip("Refresh").accessibility_label("Refresh merge requests")
           .when(!this.loading, (el) => el.cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground)).active((s) => s.bg(t.selected))
-            .on_click((_e, cx) => { this.refresh(cx); run("studio-tabs.refresh"); }))
+            .on_click((_e, cx) => this.refresh(cx)))
           .child(this.loading
             ? svg(`${ICONS}/spinner.svg`).size(13).text_color(t.muted).spin(900)
             : svg("mods/studio-mrs/refresh.svg").size(13))))

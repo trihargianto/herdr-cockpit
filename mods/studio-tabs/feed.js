@@ -13,16 +13,28 @@ import { mrEvents, eventText, parseLimits, durationMs, nextJob } from "./feedlib
 
 const MR_EVERY = 180000, LIMITS_EVERY = 60000, CRON_EVERY = 300000, ERRORS_EVERY = 60000;
 const DETAIL_LIMIT = 12;
+const GLAB_AT_ONCE = 4; // a poll is ~30 `glab` calls: a few at a time, not a burst of processes
+const RECHECK_EVERY = 900000; // approvals and comments of an unchanged MR are asked again after 15 min
 
-const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+const same =(a, b) => JSON.stringify(a) === JSON.stringify(b);
 function publish(key, value) {
   if (!same(shared(key), value)) setShared(key, value);
 }
 
+// At most GLAB_AT_ONCE run together; the rest wait their turn.
+let running = 0;
+const waiting = [];
 async function glab(args) {
-  const r = await exec("glab", args, { cwd: home(), timeout: 30000 });
-  if (r.code !== 0) throw new Error((r.stderr || r.stdout || "glab failed").trim().split("\n")[0]);
-  return JSON.parse(r.stdout);
+  if (running >= GLAB_AT_ONCE) await new Promise((go) => waiting.push(go));
+  running += 1;
+  try {
+    const r = await exec("glab", args, { cwd: home(), timeout: 30000 });
+    if (r.code !== 0) throw new Error((r.stderr || r.stdout || "glab failed").trim().split("\n")[0]);
+    return JSON.parse(r.stdout);
+  } finally {
+    running -= 1;
+    waiting.shift()?.();
+  }
 }
 
 // Only what the panes need, so shared.json stays small.
@@ -46,6 +58,7 @@ export class Feed {
     this.last = { mrs: 0, limits: 0, cron: 0, errors: 0 };
     this.me = null;
     this.failures = 0;
+    this.checked = new Map(); // MR id -> when its approvals and comments were last asked
     try { this.snapshot = JSON.parse(localStorage.getItem("mr-snapshot") ?? "null"); } catch { this.snapshot = null; }
     this.badge = undefined;
   }
@@ -67,7 +80,7 @@ export class Feed {
 
   // Refresh now (the Home and MRs panes' refresh buttons call this through "studio-tabs.refresh").
   refresh(cx) {
-    this.mrs(cx);
+    this.mrs(cx, true);
     this.limits(cx);
     this.cron(cx);
     this.errors(cx);
@@ -83,7 +96,8 @@ export class Feed {
     });
   }
 
-  mrs(cx) {
+  // force: publish even without a change, so the MRs pane's "checked 1m ago" and its spinner are true.
+  mrs(cx, force = false) {
     this.job("mrs", cx, async () => {
       try {
         this.me ??= (await glab(["api", "user"])).username;
@@ -106,16 +120,35 @@ export class Feed {
             return notes.filter((n) => !n.system && n.author?.username !== me).length;
           } catch { return null; }
         };
+        // The pipeline is only in the full record, so that is asked every time. Approvals and comments
+        // are kept from the last poll while the MR is unchanged, and asked again after RECHECK_EVERY.
+        const now = Date.now();
+        const before = new Map([...(this.snapshot?.mine ?? []), ...(this.snapshot?.reviews ?? [])].map((x) => [x.id, x]));
+        const kept = (m) => {
+          const old = before.get(m.id);
+          const fresh = old && old.updated === (Date.parse(m.updated_at) || null) && now - (this.checked.get(m.id) ?? 0) < RECHECK_EVERY;
+          return fresh ? old : null;
+        };
+        const seen = new Set();
         const mine = await Promise.all(mineList.map(async (m, i) => {
           if (i >= DETAIL_LIMIT) return compact(m);
+          seen.add(m.id);
+          const old = kept(m);
+          if (old && "approvals" in old) return compact(await full(m), { approvals: old.approvals, notes: old.notes });
           const [f, a, n] = await Promise.all([full(m), approvals(m), othersNotes(m)]);
+          this.checked.set(m.id, now);
           return compact(f, { approvals: (a?.approved_by ?? []).length, ...(n != null ? { notes: n } : {}) });
         }));
         const reviews = await Promise.all(askedList.map(async (m, i) => {
           if (i >= DETAIL_LIMIT) return compact(m, { approvedByMe: false });
+          seen.add(m.id);
+          const old = kept(m);
+          if (old && "approvedByMe" in old) return compact(await full(m), { approvedByMe: old.approvedByMe });
           const [f, a] = await Promise.all([full(m), approvals(m)]);
+          this.checked.set(m.id, now);
           return compact(f, { approvedByMe: (a?.approved_by ?? []).some((x) => x.user?.username === me) });
         }));
+        for (const id of this.checked.keys()) if (!seen.has(id)) this.checked.delete(id);
         const next = { at: Date.now(), me, mine, reviews, error: null };
         this.alert(mrEvents(this.snapshot, next));
         this.snapshot = { mine, reviews };
@@ -123,11 +156,12 @@ export class Feed {
         this.failures = 0;
         // `at` changes every poll; publish it only with a real change, or every mod redraws for nothing.
         const prev = shared("studio.mrs");
-        if (!prev || !same({ ...prev, at: 0 }, { ...next, at: 0 }) || Date.now() - (prev.at ?? 0) > 600000) setShared("studio.mrs", next);
+        if (force || !prev || !same({ ...prev, at: 0 }, { ...next, at: 0 }) || Date.now() - (prev.at ?? 0) > 600000) setShared("studio.mrs", next);
       } catch (e) {
-        // One miss may be a blip; two in a row and the counts can't be trusted.
+        // One miss may be a blip; two in a row and the counts can't be trusted. Asked for by hand,
+        // the MRs pane is waiting on it: say so at once.
         this.failures += 1;
-        if (this.failures >= 2) {
+        if (force || this.failures >= 2) {
           const prev = shared("studio.mrs");
           publish("studio.mrs", { at: prev?.at ?? null, me: this.me, mine: prev?.mine ?? [], reviews: prev?.reviews ?? [], error: String(e.message ?? e) });
         }

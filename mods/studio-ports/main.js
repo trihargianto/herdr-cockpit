@@ -5,7 +5,7 @@
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, ScrollHandle } from "gpui-base";
-import { exec, spaces, panes, home, theme, window, settings, layout, props, run, nextCommand } from "herdr";
+import { exec, spaces, panes, home, theme, window, settings, layout, props, run, nextCommand, shared, setShared } from "herdr";
 import { Nav, footer } from "./nav.js";
 
 const ICONS = "mods/studio-workspace-chrome";
@@ -134,6 +134,10 @@ export default class Ports extends View {
           .sort((a, b) => a.port - b.port);
         this.at = Date.now();
         this.error = null;
+        // The tab bar's Ports counter: while this pane scans, the tab bar skips its own `lsof`.
+        const base = home();
+        const n = this.list.filter((p) => !isTool(p) && (isPlannotator(p) || (p.cwd.startsWith(`${base}/`) && !p.cwd.startsWith(`${base}/Library`)))).length;
+        if (shared("studio.servers") !== n) setShared("studio.servers", n);
       } catch (e) {
         this.error = String(e.message ?? e);
       }

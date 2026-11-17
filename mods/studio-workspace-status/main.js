@@ -46,7 +46,10 @@ export default class WorkspaceStatus extends View {
         if (this.sys && page) this.load = { cpu: Math.min(1, cpu / (this.sys.cores * 100)), memKb: (used * page) / 1024, ramKb: this.sys.ramKb };
       } catch {}
       this.reading = false;
-      cx.notify();
+      // Every redraw repaints the whole window: only when what the chip says has changed.
+      const l = this.load;
+      const shown = l ? `${Math.round(l.cpu * 100)}|${gb(l.memKb)}|${Math.round((l.memKb / l.ramKb) * 100)}` : "";
+      if (shown !== this.loadShown) { this.loadShown = shown; cx.notify(); }
     });
   }
 

@@ -156,11 +156,13 @@ export default class Usage extends View {
       }
     });
     // Reads once a minute, but only while this pane is the one shown (and at once when it opens).
+    // The process monitor (`ps`, every 3 s) redraws when it lands; with the window in the background it
+    // stops after its first reading.
     cx.timer.every(3000, (cx) => {
       if (!shown("usage")) return;
-      this.monitor(cx);
-      if (window()?.active && Date.now() - this.last > 60000) this.refresh(cx);
-      else cx.notify();
+      const active = window()?.active !== false;
+      if (active || !this.mons[this.machine ?? ""]) this.monitor(cx);
+      if (active && Date.now() - this.last > 60000) this.refresh(cx);
     });
   }
 

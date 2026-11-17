@@ -43,13 +43,17 @@ export class Nav {
   }
 
   // Focus has no "lost" event: redraw when the keyboard arrives or leaves, so the highlighted row and
-  // the key footer never outstay it. Cheap: it redraws only on a change.
+  // the key footer never outstay it. It redraws only on a change, and looks often (300 ms) only while
+  // this copy has the keyboard: arriving goes through focus() or a click, which redraw anyway, so the
+  // slow look (1.5 s) is just a safety net. Every panel copy runs one, shown or not.
   watch(cx) {
     this.shown = this.focused();
-    cx.timer.every(300, (cx) => {
+    const look = (cx) => {
       const k = this.focused();
       if (k !== this.shown) { this.shown = k; cx.notify(); }
-    });
+      cx.timer.after(k ? 300 : 1500, look);
+    };
+    cx.timer.after(300, look);
   }
 
   // Whether a nextCommand string asks this copy (upper or lower half) to take the keyboard.

@@ -76,13 +76,15 @@ export default class Tabs extends View {
     });
     this.readTodo(cx);
     this.countServers(cx);
-    cx.timer.every(15000, (cx) => this.countServers(cx));
+    cx.timer.every(30000, (cx) => this.countServers(cx));
     cx.timer.every(5000, (cx) => this.readTodo(cx));
   }
 
   command(c, cx) {
     if (c === "neovim") this.openNeovim(cx);
     else if (c === "refresh") this.feed.refresh(cx);
+    // The MRs pane has no fetch of its own: it asks the feed when it opens on old data, and every 2 min while shown.
+    else if (c === "refresh-mrs") this.feed.mrs(cx, true);
     else if (c === "panel") this.showPanel("mrs");
     else if (c.startsWith("show-")) this.showPanel(c.slice(5));
     else if (c.startsWith("toggle-")) this.showPanel(c.slice(7), true);
@@ -188,6 +190,14 @@ export default class Tabs extends View {
   // while the window is in front.
   countServers(cx) {
     if (!window()?.active || this.scanning) return;
+    // The Ports pane, when shown, scans every 10 seconds and shares its count: no second `lsof`.
+    const root = layout(), panel = find(root, "panel"), body = find(root, "panel-body"), lower = find(root, "panel-lower");
+    const portsShown = panel && !panel.hidden && (body?.active === "ports" || (lower && !lower.hidden && lower.active === "lower-ports"));
+    if (portsShown) {
+      const n = shared("studio.servers");
+      if (typeof n === "number" && n !== this.servers) { this.servers = n; cx.notify(); }
+      return;
+    }
     this.scanning = true;
     cx.spawn(async (cx) => {
       let n = this.servers;
