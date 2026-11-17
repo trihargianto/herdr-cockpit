@@ -16,7 +16,7 @@ const MARK = { ansi6: "#22a99a", ansi3: "#e3814f", ansi4: "#5b8def", ansi5: "#8b
 // same order, so they agree, and adding or renaming spaces moves nothing.
 // Side panels, offered when what you type matches one ("inb", "mrs", "ports"…).
 const PANELS = [["home", "Home"], ["inbox", "Inbox"], ["mrs", "Merge requests MRs"], ["tasks", "Tasks"], ["usage", "Monitoring usage limits"],
-  ["ports", "Ports servers"], ["talk", "Agent talk"], ["projects", "Projects"], ["review", "Review Hunk diff"], ["automations", "Automations cron"]];
+  ["ports", "Ports servers"], ["talk", "Agent talk"], ["projects", "Projects"], ["review", "Review Hunk diff"], ["automations", "Automations cron"], ["annotate", "Annotations notes"]];
 const PROJECT_COLORS = ["ansi6", "ansi3", "ansi4", "ansi5", "ansi2", "ansi1"];
 function spaceColors() {
   const ids = new Set(spaces().map((p) => p.id));

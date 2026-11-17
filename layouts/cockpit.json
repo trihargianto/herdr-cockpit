@@ -2,6 +2,7 @@
   "id": "root",
   "type": "row",
   "titlebar": "none",
+  "terminal_menu": "cockpit-menu",
   "traffic_lights": [
     12,
     15
@@ -201,6 +202,13 @@
                       "type": "block",
                       "content": {
                         "mod": "cockpit-usage"
+                      }
+                    },
+                    {
+                      "id": "annotate",
+                      "type": "block",
+                      "content": {
+                        "mod": "cockpit-annotate"
                       }
                     },
                     {

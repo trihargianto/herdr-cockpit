@@ -1,7 +1,9 @@
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex, ScrollHandle } from "gpui-base";
-import { spaces, panes, agents, run, openOverlay, theme, window, layout, settings, keys, focused, terminals, exec, readTextFile, appHome, home, nextCommand, shared, setShared, notify, checking } from "herdr";
+import { spaces, panes, agents, run, openOverlay, theme, window, layout, settings, keys, focused, terminals, exec, hc, readTextFile, appHome, home, nextCommand, shared, setShared, notify, checking } from "herdr";
 import { Feed } from "./feed.js";
+import * as fs from "fs/promises";
+import { KEY as ANNOTATIONS, notesOf, newId, clip, dialogHeight, message, queue, unqueue, remove, queuedByTarget, ready, lastReply, reviewMessage } from "./annolib.js";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -21,8 +23,8 @@ const VERSION = /^\d+\.\d+\.\d+$/;
 // Tasks would each save their own list over the other's.
 const LOWER = new Set(["home", "inbox", "mrs", "ports", "usage"]);
 // The mod behind each panel, for handing it the keyboard ("cockpit-inbox.focus").
-const MODS = { home: "cockpit-home", projects: "cockpit-projects", talk: "cockpit-talk", automations: "cockpit-automations", review: "cockpit-review", usage: "cockpit-usage", ports: "cockpit-ports", tasks: "cockpit-tasks", inbox: "cockpit-inbox", mrs: "cockpit-mrs" };
-const NAMES = { home: "Home", projects: "Projects", talk: "Agent talk", automations: "Automations", review: "Review", usage: "Monitoring", ports: "Ports", tasks: "Tasks", inbox: "Inbox", mrs: "Merge requests" };
+const MODS = { annotate: "cockpit-annotate", home: "cockpit-home", projects: "cockpit-projects", talk: "cockpit-talk", automations: "cockpit-automations", review: "cockpit-review", usage: "cockpit-usage", ports: "cockpit-ports", tasks: "cockpit-tasks", inbox: "cockpit-inbox", mrs: "cockpit-mrs" };
+const NAMES = { annotate: "Annotations", home: "Home", projects: "Projects", talk: "Agent talk", automations: "Automations", review: "Review", usage: "Monitoring", ports: "Ports", tasks: "Tasks", inbox: "Inbox", mrs: "Merge requests" };
 
 export default class Tabs extends View {
   // A new tab running Neovim, in the repository root of the focused pane (else its folder). The tab bar's
@@ -81,6 +83,11 @@ export default class Tabs extends View {
         this.command(c, cx);
       }
     });
+    // Annotations queued for an agent go out from here, the one mod always on screen, once it's idle.
+    this.annoSending = new Set();
+    if (!checking()) cx.timer.every(1000, (cx) => this.drainAnnotations(cx));
+    // Plannotator reviews you opened: their results come back as files, looked for while any is open.
+    if (!checking()) cx.timer.every(3000, (cx) => this.checkReviews(cx));
     this.readTodo(cx);
     this.countServers(cx);
     cx.timer.every(30000, (cx) => this.countServers(cx));
@@ -115,7 +122,263 @@ export default class Tabs extends View {
     else if (c === "go-done") this.goAgent("done");
     else if (c === "open-mr") this.openMr(cx);
     // Commands reach shown copies only: give the Tasks pane a moment to be on screen first.
+    else if (c === "annotate") this.annotate(cx);
+    else if (c === "annotate-send") this.annotateSend();
+    else if (c === "review-last") this.reviewLast(cx);
+    else if (c === "review-folder") this.reviewFolder(cx);
     else if (c === "new-task") { this.showPanel("tasks"); cx.timer.after(120, () => run("cockpit-tasks.quick")); }
+  }
+
+  // Annotate: copy the focused terminal's selection, then open the note dialog with it. The selection is
+  // read here, before any overlay takes the keyboard. The clipboard is left as it was (with
+  // copy-on-select it already held the selection).
+  // Programs that take the mouse (Claude Code, Neovim) select text themselves: Herdr has no selection
+  // then, and a click there clears Herdr's. Their selection lands on the clipboard, so with no
+  // selection the note quotes the clipboard (the dialog says so).
+  annotate(cx) {
+    const f = focused();
+    const address = f?.shown ?? f?.terminal;
+    if (!address) { notify({ title: "Click a terminal first", body: "Annotate works on text selected in a terminal.", level: "info", timeout: 3000 }); return; }
+    const selection = f.selection ?? terminals().find((x) => x.address === address)?.selection;
+    if (!selection) {
+      const quote = clip(cx.read_from_clipboard());
+      if (!quote) { notify({ title: "Nothing selected", body: "Select text (hold Shift in Claude Code or Neovim) or copy it, then press Ctrl+B A.", level: "info", timeout: 4000 }); return; }
+      openOverlay({ mod: "cockpit-annotate", kind: "dialog", width: 540, height: dialogHeight(quote), props: { mode: "new", from: "clipboard", quote, source: this.annotationSource(address) } });
+      return;
+    }
+    const before = cx.read_from_clipboard();
+    run("terminal.copy");
+    cx.timer.after(30, (cx) => {
+      const text = cx.read_from_clipboard();
+      if (before !== undefined && text !== before) cx.write_to_clipboard(before);
+      const quote = clip(text);
+      if (!quote) { notify({ title: "Couldn't read the selection", level: "warning", timeout: 3000 }); return; }
+      openOverlay({ mod: "cockpit-annotate", kind: "dialog", width: 540, height: dialogHeight(quote), props: { mode: "new", quote, source: this.annotationSource(address) } });
+    });
+  }
+
+  // Where a note came from, kept with it: the panel groups by it and the message names it.
+  annotationSource(address) {
+    const agent = agents().find((a) => a.address === address);
+    const pane = panes().find((p) => p.terminal === address);
+    const tabId = agent?.tab ?? pane?.tab ?? null;
+    const space = spaces().find((s) => s.tabs.some((tab) => tab.id === tabId)) ?? spaces().find((s) => s.id === focused()?.space);
+    const tab = space?.tabs.find((x) => x.id === tabId);
+    const program = agent?.program ?? pane?.program;
+    const title = (agent?.title ?? pane?.title ?? "").replace(/^[^\p{L}\p{N}~/]+/u, "").trim();
+    const telling = title && title !== program?.name && title.toLowerCase() !== program?.key && !/^[~/]/.test(title);
+    const label = agent ? (telling ? `${program?.name ?? "Agent"} · ${title}` : program?.name ?? "Agent") : (telling ? title : program?.name || "Terminal");
+    return { terminal: address, space: space?.id ?? null, space_name: space?.name ?? null, tab: tabId, tab_name: tab?.name ?? null,
+      label, agent: Boolean(agent), icon: program?.icon ?? null, tint: Boolean(program?.tint) };
+  }
+
+  // Right-click › Send annotations here: queue this space's waiting notes for the focused agent.
+  annotateSend() {
+    const f = focused();
+    const to = f?.shown ?? f?.terminal;
+    const agent = agents().find((a) => a.address === to);
+    if (!agent) { notify({ title: "Not an agent", body: "Annotations go to an agent's terminal.", level: "info", timeout: 3000 }); return; }
+    const notes = notesOf(shared(ANNOTATIONS));
+    const ids = notes.filter((n) => !n.queued && n.source?.space === agent.space).map((n) => n.id);
+    if (!ids.length) { notify({ title: "No annotations to send", body: "This space has none waiting.", level: "info", timeout: 3000 }); return; }
+    setShared(ANNOTATIONS, { notes: queue(notes, ids, to) });
+  }
+
+  // Sends each agent its queued notes once it's idle (or done), one `hc send` per agent at a time.
+  // A note leaves the list only when the send worked; otherwise it goes back with the reason.
+  drainAnnotations(cx) {
+    const notes = notesOf(shared(ANNOTATIONS));
+    if (!notes.some((n) => n.queued)) return;
+    for (const q of queuedByTarget(notes)) {
+      if (this.annoSending.has(q.to)) continue;
+      const agent = agents().find((a) => a.address === q.to);
+      if (!agent) { setShared(ANNOTATIONS, { notes: unqueue(notesOf(shared(ANNOTATIONS)), { to: q.to, error: "the agent closed" }) }); continue; }
+      if (!ready(agent.status)) continue;
+      this.annoSending.add(q.to);
+      const ids = q.notes.map((n) => n.id);
+      const text = message(q.notes, q.to);
+      cx.spawn(async () => {
+        let r;
+        try { r = await exec("hc", ["send", q.to, text], { cwd: home(), timeout: 60000 }); }
+        catch (e) { r = { code: 1, stdout: "", stderr: String(e?.message ?? e) }; }
+        const now = notesOf(shared(ANNOTATIONS));
+        if (r.code === 0) {
+          setShared(ANNOTATIONS, { notes: remove(now, ids) });
+          this.archiveAnnotations(now.filter((n) => ids.includes(n.id)), q.to);
+          notify({ title: `Sent ${ids.length} ${ids.length === 1 ? "annotation" : "annotations"}`, body: `To ${agent.program?.name ?? "the agent"} (${q.to})`, level: "success", timeout: 2500 });
+        } else {
+          const why = (r.stderr || r.stdout || "hc send failed").trim().split("\n")[0];
+          setShared(ANNOTATIONS, { notes: unqueue(now, { ids, error: why }) });
+          notify({ title: "Annotations not sent", body: why, level: "error", timeout: 5000 });
+        }
+        this.annoSending.delete(q.to);
+      });
+    }
+  }
+
+  // ---- Plannotator reviews. Plannotator opens the review in the browser and, when you submit, writes
+  // {decision, feedback} to a result file; the feedback then joins the annotation queue for the agent, so
+  // it waits if the agent is busy. Open reviews are kept in shared "cockpit.reviews", so they survive a reload.
+
+  // Review the focused agent's last reply. Claude Code: from its transcript (terminal → its process →
+  // ~/.claude/sessions/<pid>.json → the session's log). Other agents: the end of their screen.
+  reviewLast(cx) {
+    const f = focused();
+    const to = f?.shown ?? f?.terminal;
+    const agent = agents().find((a) => a.address === to);
+    if (!agent) { notify({ title: "Focus an agent first", body: "Review last reply works on an agent's terminal.", level: "info", timeout: 3000 }); return; }
+    if (to.includes("/")) { notify({ title: "Not on this computer", body: "Reviews work for agents on this computer for now.", level: "info", timeout: 3500 }); return; }
+    cx.spawn(async () => {
+      let text = "", from = "transcript";
+      try {
+        const info = JSON.parse((await hc(["get", to, "--json"])).stdout);
+        const pid = info?.foreground?.pid;
+        const session = pid ? JSON.parse((await readTextFile(`${home()}/.claude/sessions/${pid}.json`)) ?? "null") : null;
+        if (session?.sessionId && /^[\w-]+$/.test(session.sessionId)) {
+          const r = await exec("sh", ["-c", 'f=$(ls -t "$HOME"/.claude/projects/*/"$1".jsonl 2>/dev/null | head -1); [ -n "$f" ] && tail -n 800 "$f"', "sh", session.sessionId], { cwd: home(), timeout: 10000 });
+          text = lastReply(r.stdout.split("\n"));
+        }
+      } catch {}
+      if (!text) {
+        from = "screen";
+        try {
+          const r = await hc(["read", to, "--lines", "300"]);
+          text = r.code === 0 ? clip(r.stdout.replace(/\u001b\[[0-9;?]*[A-Za-z]/g, "")) : "";
+        } catch {}
+      }
+      if (!text) { notify({ title: "No reply to review", body: "This agent hasn't written a reply yet.", level: "info", timeout: 3000 }); return; }
+      const name = agent.program?.name ?? "Agent";
+      const file = await this.reviewFile(`# Last reply from ${name} (${to})\n\n${text}\n`);
+      if (!file) return;
+      this.startReview({ path: file, temp: true, cwd: home(), title: `${name} (${to}) · last reply`, what: "your last reply", to,
+        note: from === "screen" ? "Read from the screen: this agent has no transcript Cockpit can read." : null });
+    });
+  }
+
+  // Review the documents in the focused pane's repository (or folder). The feedback goes to the focused
+  // agent; from a terminal that isn't one, it lands in Annotations for you to send.
+  reviewFolder(cx) {
+    const f = focused();
+    const address = f?.shown ?? f?.terminal;
+    if (!address) { notify({ title: "Click a terminal first", level: "info", timeout: 3000 }); return; }
+    if (address.includes("/")) { notify({ title: "Not on this computer", body: "Reviews work for folders on this computer for now.", level: "info", timeout: 3500 }); return; }
+    const pane = panes().find((p) => p.terminal === address);
+    const here = pane?.cwd ?? f?.cwd;
+    if (!here) { notify({ title: "No folder for this terminal", level: "info", timeout: 3000 }); return; }
+    const agent = agents().find((a) => a.address === address);
+    cx.spawn(async () => {
+      let folder = here;
+      try {
+        const r = await exec("git", ["rev-parse", "--show-toplevel"], { cwd: here, timeout: 10000 });
+        if (r.code === 0 && r.stdout.trim()) folder = r.stdout.trim();
+      } catch {}
+      const name = folder.split("/").pop() || folder;
+      this.startReview({ path: folder, temp: false, cwd: folder, title: name, what: `the documents in ${name}`, to: agent ? address : null, from: address });
+    });
+  }
+
+  async reviewFile(text) {
+    const dir = `${appHome()}/cockpit-annotate/reviews`;
+    try {
+      await fs.mkdir(dir, { recursive: true });
+      const file = `${dir}/${newId()}.md`;
+      await fs.writeFile(file, text);
+      return file;
+    } catch (e) {
+      notify({ title: "Couldn't start the review", body: String(e?.message ?? e), level: "error", timeout: 5000 });
+      return null;
+    }
+  }
+
+  // Starts `plannotator annotate --gate` in the background (it serves the page until you submit) and
+  // remembers where its result will land.
+  async startReview({ path, temp, cwd, title, what, to, from = null, note = null }) {
+    const dir = `${appHome()}/cockpit-annotate/reviews`;
+    const id = newId();
+    const result = `${dir}/${id}.json`, log = `${dir}/${id}.log`;
+    try {
+      await fs.mkdir(dir, { recursive: true });
+      const r = await exec("sh", ["-c", 'nohup plannotator annotate "$1" --title "$2" --gate --json --result-file "$3" >/dev/null 2>"$4" </dev/null & echo $!',
+        "sh", path, title, result, log], { cwd, timeout: 15000 });
+      const pid = Number(r.stdout.trim());
+      if (r.code !== 0 || !pid) throw new Error((r.stderr || "plannotator didn't start").trim().split("\n")[0]);
+      const reviews = Array.isArray(shared("cockpit.reviews")) ? shared("cockpit.reviews") : [];
+      setShared("cockpit.reviews", [...reviews, { id, pid, to, from: from ?? to, title, what, result, log, file: temp ? path : null, at: Date.now() }]);
+      notify({ title: "Review opened in your browser", body: note ?? (to ? `Your feedback goes to ${to} when you submit.` : "Your feedback lands in Annotations when you submit."), level: "info", timeout: 3500 });
+    } catch (e) {
+      notify({ title: "Couldn't start Plannotator", body: String(e?.message ?? e), level: "error", timeout: 5000 });
+    }
+  }
+
+  // Looks for finished reviews: a result file means you submitted; a Plannotator that's gone without one
+  // failed or was closed (its last error line is shown).
+  checkReviews(cx) {
+    const reviews = Array.isArray(shared("cockpit.reviews")) ? shared("cockpit.reviews") : [];
+    if (!reviews.length || this.checkingReviews) return;
+    this.checkingReviews = true;
+    cx.spawn(async () => {
+      for (const rv of reviews) {
+        let text = null;
+        try { text = await readTextFile(rv.result); } catch {}
+        let done = false;
+        if (text) {
+          done = true;
+          let parsed = null;
+          try { parsed = JSON.parse(text); } catch {}
+          this.reviewDone(rv, parsed);
+        } else {
+          let alive = true;
+          try { alive = (await exec("kill", ["-0", String(rv.pid)], { cwd: home(), timeout: 5000 })).code === 0; } catch {}
+          if (!alive) {
+            done = true;
+            // The result can land just as the process ends: look once more.
+            try { text = await readTextFile(rv.result); } catch {}
+            if (text) { try { this.reviewDone(rv, JSON.parse(text)); } catch { this.reviewDone(rv, null); } }
+            else {
+              let why = "";
+              try { why = ((await readTextFile(rv.log)) ?? "").trim().split("\n").filter(Boolean).pop() ?? ""; } catch {}
+              notify({ title: "Review closed", body: why || `${rv.title}: nothing was sent.`, level: why ? "warning" : "info", timeout: 4000 });
+            }
+          }
+        }
+        if (done) {
+          const now = Array.isArray(shared("cockpit.reviews")) ? shared("cockpit.reviews") : [];
+          setShared("cockpit.reviews", now.filter((x) => x.id !== rv.id));
+          for (const p of [rv.result, rv.log, rv.file]) if (p) fs.unlink(p).catch(() => {});
+        }
+      }
+      this.checkingReviews = false;
+    });
+  }
+
+  // A submitted review: its feedback joins the annotation queue for the agent, or waits in Annotations.
+  reviewDone(rv, result) {
+    const text = reviewMessage(result, rv.what);
+    if (!text) { notify({ title: "Review closed", body: `${rv.title}: nothing to send.`, level: "info", timeout: 3000 }); return; }
+    const live = rv.to && agents().some((a) => a.address === rv.to);
+    const base = this.annotationSource(rv.from ?? rv.to ?? focused()?.terminal);
+    const note = { id: newId(), at: Date.now(), kind: "review", quote: "", comment: text,
+      source: { ...base, label: `Plannotator · ${rv.title}` } };
+    let notes = [...notesOf(shared(ANNOTATIONS)), note];
+    if (live) notes = queue(notes, [note.id], rv.to);
+    setShared(ANNOTATIONS, { notes });
+    const approved = result?.decision === "approved";
+    notify({ title: approved ? "Approved" : "Review feedback ready",
+      body: live ? `Going to ${rv.to}${agents().find((a) => a.address === rv.to && ready(a.status)) ? "" : " when it's idle"}.` : "It's in Annotations: pick an agent and send it.",
+      level: "success", timeout: 3000 });
+  }
+
+  // Sent notes are kept, one JSON line each, in cockpit-annotate/sent.jsonl.
+  async archiveAnnotations(notes, to) {
+    if (!notes.length) return;
+    const dir = `${appHome()}/cockpit-annotate`;
+    const lines = notes.map((n) => JSON.stringify({ ...n, queued: undefined, sent: { to, how: "send", at: Date.now() } })).join("\n") + "\n";
+    try {
+      await fs.mkdir(dir, { recursive: true });
+      const file = `${dir}/sent.jsonl`;
+      const before = (await fs.exists(file)) ? await fs.readFile(file, "utf8") : "";
+      await fs.writeFile(file, before + lines);
+    } catch {}
   }
 
   // The sidebar between its rail and the width it had (as the sidebar's own toggle does). A hidden
@@ -360,6 +623,10 @@ export default class Tabs extends View {
     const blocked = waiting.filter(a => a.status === "blocked").length;
     const finished = waiting.length - blocked;
     const inboxColor = blocked ? t.blocked : t.done;
+    // Annotations waiting in the space you're in; amber while some are queued for a busy agent.
+    const annoAll = notesOf(shared(ANNOTATIONS));
+    const annoHere = annoAll.filter((n) => !n.queued && n.source?.space === focused()?.space).length;
+    const annoQueued = annoAll.filter((n) => n.queued).length;
     // label: text next to the icon; without it the button is icon-only and says what it is on hover.
     const panelButton = (id, label, icon, tip, badge) => {
       const on = panel && !panel.hidden && body?.active === id;
@@ -422,6 +689,8 @@ export default class Tabs extends View {
       ["talk", named("Agent talk"), "mods/cockpit-tabs/talk.svg", "Agent talk · which agents message which"],
       ["automations", named("Automations"), "mods/cockpit-tabs/automations.svg", "Automations · scheduled cron jobs"],
       ["review", named("Review"), "mods/cockpit-workspace-chrome/git-compare.svg", "Review changes in Hunk"],
+      ["annotate", named("Annotations"), "mods/cockpit-tabs/annotate.svg", [annoHere ? `${annoHere} in this space` : null, annoQueued ? `${annoQueued} queued` : null].filter(Boolean).length ? `Annotations · ${[annoHere ? `${annoHere} in this space` : null, annoQueued ? `${annoQueued} queued` : null].filter(Boolean).join(", ")}` : "Annotations · notes on terminal text for agents",
+        annoQueued ? { n: annoHere + annoQueued, color: t.working } : annoHere ? { n: annoHere, color: t.muted } : null],
       ["usage", named("Monitoring"), "mods/cockpit-tabs/chart.svg", "Monitoring · limits, CPU and memory"],
       ["ports", named("Ports"), "mods/cockpit-tabs/plug.svg", this.servers ? `Ports · ${this.servers} ${this.servers === 1 ? "server" : "servers"} running` : "Ports and servers", this.servers ? { n: this.servers, color: t.ansi2 } : null],
       ["tasks", named("Tasks"), "mods/cockpit-tabs/list-todo.svg", this.todo ? `Tasks · ${this.todo} to do` : "Tasks", this.todo ? { n: this.todo, color: t.muted } : null],
@@ -435,7 +704,7 @@ export default class Tabs extends View {
     const orderedPanels = order.map(id => panels.find(p => p[0] === id));
     // Two groups keep a button: what needs you, then the tools you glance at. The rest sit behind the
     // Panels menu (and Ctrl+B p on the keyboard). Dragging reorders within a group.
-    const ATTENTION = ["home", "inbox", "mrs", "tasks"], TOOLS = ["ports", "usage", "talk"];
+    const ATTENTION = ["home", "inbox", "mrs", "tasks"], TOOLS = ["annotate", "ports", "usage", "talk"];
     const attention = orderedPanels.filter(p => ATTENTION.includes(p[0]));
     const tools = orderedPanels.filter(p => TOOLS.includes(p[0]));
     const menuPanels = orderedPanels.filter(p => !ATTENTION.includes(p[0]) && !TOOLS.includes(p[0]));
