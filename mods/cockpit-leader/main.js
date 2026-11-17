@@ -63,6 +63,7 @@ const TREE = [
     { key: "o", label: "Ports", run: panel("ports") },
     { key: "c", label: "Automations", run: panel("automations") },
     { key: "r", label: "Review", run: panel("review") },
+    { key: "a", label: "Annotations", run: panel("annotate") },
   ] },
   { key: "P", label: "Panels below", items: [
     { key: "P", label: "Toggle the lower half", run: tabs("lower") },
@@ -78,6 +79,9 @@ const TREE = [
     { key: "m", label: "MR for this branch", run: tabs("open-mr") },
     { key: "t", label: "New task", run: tabs("new-task") },
   ] },
+  { key: "A", label: "Annotate selection", run: tabs("annotate") },
+  { key: "o", label: "Review last reply in Plannotator", run: tabs("review-last") },
+  { key: "d", label: "Review this repo's docs in Plannotator", run: tabs("review-folder") },
   { key: "q", label: "Quiet mode (MR alerts)", run: tabs("quiet") },
   { key: "f", label: "Find", items: [
     { key: "f", label: "Quick switcher", run: [["mod.open", { name: "cockpit-picker" }]] },
@@ -112,7 +116,7 @@ const ABOUT = {
   "space.new": "New space", "space.next": "Next space", "space.prev": "Previous space", "space.select": "Go to space", "space.rename": "Rename space", "space.close": "Close space",
   "agent.next": "Next agent", "agent.prev": "Previous agent", "layout.switch": "Switch layout", "layout.toggle": "Toggle", "layout.select": "Show panel", "layout.show": "Show", "layout.hide": "Hide",
   "mod.open": "Open", "cockpit-leader.pass": "Send Ctrl+B to the terminal", "mod.open:cockpit-picker": "Quick switcher", "mod.open:cockpit-leader": "Leader keys",
-  "cockpit-tabs.sidebar": "Sidebar: rail or full", "cockpit-tabs.key-review": "Review panel", "cockpit-tabs.key-home": "Home panel", "cockpit-tabs.key-inbox": "Inbox panel", "cockpit-tabs.go-blocked": "Go to the agent that needs you", "terminal.select_all": "Select all", "terminal.search": "Find in terminal", "terminal.copy": "Copy", "terminal.paste": "Paste", "terminal.paste_image": "Paste image", "terminal.scroll": "Scroll",
+  "cockpit-tabs.sidebar": "Sidebar: rail or full", "cockpit-tabs.key-review": "Review panel", "cockpit-tabs.annotate": "Annotate selection", "cockpit-tabs.review-last": "Review last reply in Plannotator", "cockpit-tabs.review-folder": "Review docs in Plannotator", "cockpit-tabs.key-annotate": "Annotations panel", "cockpit-tabs.key-home": "Home panel", "cockpit-tabs.key-inbox": "Inbox panel", "cockpit-tabs.go-blocked": "Go to the agent that needs you", "terminal.select_all": "Select all", "terminal.search": "Find in terminal", "terminal.copy": "Copy", "terminal.paste": "Paste", "terminal.paste_image": "Paste image", "terminal.scroll": "Scroll",
   "window.minimize": "Minimize", "window.maximize": "Maximize",
 };
 function about(action) {

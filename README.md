@@ -34,7 +34,7 @@ with `Ctrl-C` and the layout stays. Check [Requirements](#requirements) first if
 | --- | --- |
 | Sidebar, top | **Spaces**: coloured avatars, a status badge per space (needs you, working, done), the repo's branch when it is unusual, `Ctrl+1` to `Ctrl+9` hints. |
 | Sidebar, bottom | **Agents**: counts by status that double as filters, sections in order of urgency, each agent's title, time in state, address and branch. |
-| Tab bar | Tabs with `Cmd+1` to `Cmd+9` hints, **+** and **Neovim**, then two groups of panel buttons: what needs you (**Home**, **Inbox**, **MRs**, **Tasks**) and tools (**Agent talk**, **Monitoring**, **Ports**), then a **Panels** menu for the rest. Counters on Inbox, MRs (red when one of your pipelines failed), Tasks and Ports. Click a button to open its pane at the top; right-click opens it in the lower half (a short line under the icon marks it). |
+| Tab bar | Tabs with `Cmd+1` to `Cmd+9` hints, **+** and **Neovim**, then two groups of panel buttons: what needs you (**Home**, **Inbox**, **MRs**, **Tasks**) and tools (**Annotations**, **Agent talk**, **Monitoring**, **Ports**), then a **Panels** menu for the rest. Counters on Inbox, MRs (red when one of your pipelines failed), Tasks, Annotations and Ports. Click a button to open its pane at the top; right-click opens it in the lower half (a short line under the icon marks it). |
 | Pane header | Program, folder, branch and the terminal's Herdr address. |
 | Status bar | Machine, address, folder, branch; then chips that appear only when they matter: agents that need you, failed pipelines, Herdr errors, an automation due within the hour, quiet mode, Claude's 5-hour limit (amber past 70%, red past 90%), CPU and memory. Each opens the pane behind it. |
 | Dock icon | A badge with the agents that need you plus your failed pipelines. |
@@ -46,6 +46,8 @@ with `Ctrl-C` and the layout stays. Check [Requirements](#requirements) first if
 | Side pane: **Monitoring** | Context fullness per agent session, 5-hour and weekly limits for Claude and Codex, and CPU and memory per space and pane. |
 | Side pane: **Ports** | Dev servers listening on a port, with their folder and space. Open, copy the URL, or stop one. |
 | Side pane: **Review** | Opens [Hunk](https://www.hunk.dev/) on the repo you are in, and lists open Hunk windows. |
+| Side pane: **Annotations** | Notes on terminal text, for agents. Select text in any terminal and press `Ctrl+B A` (or right-click › **Annotate selection**), write a comment, `Cmd+Enter` saves. The pane lists the notes of the space you're in, grouped by the terminal they came from. **Send** makes them one message to an agent (the one they came from, the focused one, or one you pick); a busy agent gets it once it's idle. **Paste** puts it in the agent's prompt without sending. Right-click an agent › **Send annotations here** does the same from the terminal. |
+| Plannotator reviews | `Ctrl+B o` (or right-click an agent › **Review last reply in Plannotator**) opens the agent's last reply in [Plannotator](https://plannotator.ai) in your browser; `Ctrl+B d` opens the documents of the repo you're in. Comment, then **Approve** or send feedback: it goes to the agent as its next message (waiting if it's busy), or into Annotations when the review didn't start from an agent. For Claude Code the reply comes from its transcript; other agents, from the end of their screen. Needs `plannotator` on your PATH. |
 | Side pane: **Agent talk** | Which agents message which. |
 | Side pane: **Automations** | Your crontab's jobs: add, edit, turn on and off. |
 
@@ -74,6 +76,7 @@ and a footer lists its keys; `?` shows them all. The shared rules live in `nav.j
 | Ports | `s` go to space, `H` hidden listeners |
 | Monitoring | `[` `]` machine |
 | Review | `t` beside or new tab |
+| Annotations | `s` send, `x`/`Space` mark, `p` paste, `t` who gets them, `e` edit, `yy` copy, `a` all spaces, `u` cancel queued |
 | Automations | `a` new, `e` edit, `t`/`Space` on or off, `f` filter |
 | Agent talk | `c` clear |
 | Spaces | `za` terminals, `r` rename, `n` new space, `dd` close (asks) |
@@ -112,13 +115,16 @@ group, and `?` lists every shortcut. Pressing `Ctrl+B` twice sends a real `Ctrl+
 | --- | --- |
 | `h j k l`, `H J K L` | Focus or swap panes |
 | `w`, `t`, `s`, `a` | Pane, tab, space and agent groups |
-| `p` then `h i t g o m l p c r` | Home, Inbox, Tasks, MRs, Ports, Monitoring, Agent talk, Projects, Automations, Review: open and focus (`q` inside closes) |
+| `p` then `h i t g o m l p c r a` | Home, Inbox, Tasks, MRs, Ports, Monitoring, Agent talk, Projects, Automations, Review, Annotations: open and focus (`q` inside closes) |
 | `P` then `P`, or `h i g o m` | Toggle the lower half, or open that pane in it |
 | `g n` | Go to the agent that has needed you longest |
 | `g d` | Go to the agent that finished last |
 | `g m` | Open the MR for the branch of the pane you are in |
 | `g t` | New task (Tasks, with the quick-add field ready) |
 | `q` | Quiet mode on or off |
+| `A` | Annotate the selected terminal text (or what you copied last) |
+| `o` | Review the focused agent's last reply in Plannotator |
+| `d` | Review the documents of the repo you're in, in Plannotator |
 | `n` | Neovim tab |
 | `b`, `B` | Sidebar: rail or full; hide or show it |
 | `e` | Side panel, show or hide |
@@ -148,6 +154,7 @@ Here's what you need before `dev.py` will run:
 | Codex | Its limits in **Monitoring** | |
 | `crontab` | The **Automations** pane (built into macOS) | `crontab -l` |
 | A Jira site | Jira keys in tasks become links | set `jiraUrl` in `config.json` |
+| `plannotator` | Plannotator reviews (`Ctrl+B o`, `Ctrl+B d`) | [plannotator.ai](https://plannotator.ai) |
 | Node.js 18+ | Only to run the tests | `node --version` |
 
 **Monitoring reads limits from the agent's screen.** It needs Claude Code's status line to print
@@ -271,9 +278,11 @@ terminal list and a space's stored folder only record where something started, s
 | `mods/cockpit-pane` | Pane headers |
 | `mods/cockpit-workspace-chrome`, `cockpit-workspace-status` | Sidebar top row and footer; status bar |
 | `mods/cockpit-leader`, `cockpit-picker`, `cockpit-panel-menu` | `Ctrl+B` leader, `Cmd+P` switcher, the Panels menu |
+| `mods/cockpit-annotate` | Annotations: the note dialog and the side pane. `annolib.js` (also in `cockpit-tabs`, which captures selections, sends the queue and runs Plannotator reviews) holds the note format and message |
+| `mods/cockpit-menu` | The terminal right-click menu: Herdr's items plus Annotate, Send annotations here and Review last reply |
 | `mods/cockpit-inbox`, `cockpit-tasks`, `cockpit-mrs`, `cockpit-projects`, `cockpit-usage`, `cockpit-ports`, `cockpit-review`, `cockpit-talk`, `cockpit-automations` | The other side panes |
 | `mods/agenttrail` | The Agenttrail Map. Not used by the layout; Agent talk borrows its look. |
-| `tests/` | Unit tests for the feed, work items, the task report and Automations |
+| `tests/` | Unit tests for the feed, work items, the task report, Automations and annotations |
 | `dev.py` | Checks and publishes to Herdr, watches for edits, and uninstalls |
 | `config.example.json` | The settings template; copy it to `config.json` |
 | `keybindings.json` | Cockpit's shortcuts, merged into Herdr's `keys.json` |
