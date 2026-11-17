@@ -5,8 +5,9 @@
 // Local repositories only: Hunk's daemon lives on this computer.
 
 import { View, div, svg } from "gpui-kit";
-import { v_flex, h_flex } from "gpui-base";
-import { exec, focused, panes, spaces, terminals, run, theme, window, settings, layout } from "herdr";
+import { v_flex, h_flex, ScrollHandle } from "gpui-base";
+import { exec, focused, panes, spaces, terminals, run, theme, window, settings, layout, props, nextCommand } from "herdr";
+import { Nav, footer } from "./nav.js";
 
 const ICONS = "mods/studio-workspace-chrome";
 
@@ -56,9 +57,22 @@ export default class Review extends View {
     this.place = load("place", "right"); // "right" beside the focused pane, or "tab"
     this.cwd = undefined;
     this.last = 0;
+    // Keyboard: the launch rows, then the open Hunk windows (rebuilt on each render).
+    this.nav = new Nav(cx, { slot: props()?.slot ?? null });
+    this.nav.watch(cx);
+    this.scroll = ScrollHandle.new();
+    this.items = [];
+    cx.spawn(async (cx) => {
+      for (;;) {
+        const c = await nextCommand();
+        if (this.nav.wants(c, props()?.slot)) { this.nav.focus(); cx.notify(); }
+      }
+    });
     // The repository follows the terminal you are in and Hunk windows are polled gently, both only
     // while this pane is the one shown (and at once when it opens).
     cx.timer.every(2000, (cx) => {
+      // The first look runs even with the window in the background, so the pane never sits on "Looking…".
+      if (shown("review") && this.cwd === undefined && !this.firstLook) { this.firstLook = true; this.refreshRepo(cx); return; }
       if (!window()?.active || !shown("review")) return;
       const now = Date.now();
       if (now - this.last > 10000) {
@@ -152,6 +166,21 @@ export default class Review extends View {
     cx.timer.after(1800, (cx) => this.refreshSessions(cx));
   }
 
+  onKey(e, cx) {
+    const it = () => this.items[this.nav.sel];
+    const open = () => it()?.open(cx);
+    const used = this.nav.key(e, this.items.length, {
+      enter: open, o: open, l: open,
+      t: () => { this.place = this.place === "tab" ? "right" : "tab"; save("place", this.place); },
+      r: () => { this.refreshRepo(cx); this.refreshSessions(cx); },
+    }, run);
+    if (!used) return;
+    cx.stop_propagation();
+    const sec = this.items[this.nav.sel]?.section;
+    if (sec != null) this.scroll.scroll_to_item(sec);
+    cx.notify();
+  }
+
   // Jump inside an open Hunk window without switching to it.
   jump(session, args, cx) {
     cx.spawn(async (cx) => {
@@ -182,9 +211,9 @@ export default class Review extends View {
   }
 
   // A launch row: what it opens, how much there is to review, and a quiet hint of the command.
-  launcher(t, id, title, hint, count, argv, enabled) {
+  launcher(t, id, title, hint, count, argv, enabled, on = false) {
     const mono = settings().font_family ?? "JetBrains Mono";
-    return h_flex().id(id).h(48).px(12).gap(10).items_center().flex_none().rounded(10).border(1).border_color(t.border).bg(t.chrome)
+    return h_flex().id(id).h(48).px(12).gap(10).items_center().flex_none().rounded(10).border(1).border_color(on ? t.accent : t.border).bg(on ? t.selected : t.chrome)
       .accessibility_label(`${title}${count != null ? `, ${count}` : ""}. ${enabled ? "Open in Hunk" : "Nothing to review"}`)
       .when(enabled, (el) => el.cursor_pointer().hover((s) => s.bg(t.hover)).active((s) => s.bg(t.selected))
         .on_click((_e, cx) => this.launch(title, argv, cx)))
@@ -192,16 +221,16 @@ export default class Review extends View {
         .child(div().truncate().text_color(enabled ? t.foreground : t.dim).font_medium().child(title))
         .child(div().id(`${id}-hint`).truncate().text_size(11).text_color(t.dim).font_family(mono).tooltip(`hunk ${argv.slice(1).join(" ")}`).child(hint)))
       .when(count != null, (el) => el.child(div().flex_none().h(20).min_w(20).px(6).flex().items_center().justify_center().rounded(10)
-        .bg(count > 0 ? t.raised : "#00000000").text_size(11.5).font_medium().text_color(count > 0 ? t.foreground : t.dim).child(String(count))))
+        .when(count > 0, (el) => el.bg(t.raised)).text_size(11.5).font_medium().text_color(count > 0 ? t.foreground : t.dim).child(String(count))))
       .child(svg(`${ICONS}/chevron-right.svg`).size(12).flex_none().text_color(enabled ? t.dim : t.dim + "55"));
   }
 
-  windowCard(t, s) {
+  windowCard(t, s, on = false) {
     const open = this.open === s.sessionId;
     const pane = this.paneOf(s);
     const adds = (s.files ?? []).reduce((n, f) => n + (f.additions ?? 0), 0);
     const dels = (s.files ?? []).reduce((n, f) => n + (f.deletions ?? 0), 0);
-    return v_flex().id(`hunk-${s.sessionId}`).w_full().flex_none().rounded(10).border(1).border_color(open ? t.input : t.border).bg(open ? t.surface : t.chrome)
+    return v_flex().id(`hunk-${s.sessionId}`).w_full().flex_none().rounded(10).border(1).border_color(on ? t.accent : open ? t.input : t.border).bg(on ? t.selected : open ? t.surface : t.chrome)
       .when(!open, (el) => el.hover((c) => c.bg(t.hover)).active((c) => c.bg(t.selected)))
       .child(v_flex().id(`hunk-head-${s.sessionId}`).px(12).py(10).gap(4).cursor_pointer()
         .accessibility_label(`${s.title}, ${s.fileCount} files. ${open ? "Collapse" : "Show files"}`)
@@ -244,39 +273,61 @@ export default class Review extends View {
   render() {
     const t = theme();
     const r = this.repo;
-    return v_flex().size_full().min_w(0).min_h(0).bg(t.chrome).text_color(t.foreground).text_size(13)
+    const kbd = this.nav.focused();
+    const items = [];
+    const kids = [];
+    const sel = () => kbd && this.nav.sel === items.length - 1;
+    // A launch row that has something to open; `section` is its place among the scroll area's children.
+    const launch = (id, title, hint, count, argv, enabled) => {
+      if (enabled) items.push({ open: (cx) => this.launch(title, argv, cx), section: kids.length });
+      kids.push(this.launcher(t, id, title, hint, count, argv, enabled, enabled && sel()));
+    };
+    if (this.remote) kids.push(div().px(4).py(6).text_size(12).text_color(t.dim).whitespace_normal().child("This terminal is on another machine. Hunk reviews repositories on this computer only."));
+    if (!r && !this.remote && this.cwd === undefined) kids.push(div().px(4).py(6).text_size(12).text_color(t.dim).child("Looking for the repository…"));
+    if (!r && !this.remote && this.cwd !== undefined) kids.push(div().px(4).py(6).text_size(12).text_color(t.dim).whitespace_normal().child("The terminal you are in isn't inside a git repository."));
+    if (r) {
+      kids.push(h_flex().px(2).gap(8).items_center()
+        .child(div().flex_none().text_size(13).font_medium().child(base(r.root)))
+        .child(div().id("review-branch").flex_1().min_w(0).truncate().text_size(12).text_color(t.dim).tooltip(r.branch).child(r.branch)));
+      launch("open-working", "Working changes", "hunk diff --watch", r.changed, ["hunk", "diff", "--watch"], r.changed > 0);
+      launch("open-staged", "Staged", "hunk diff --staged", r.staged, ["hunk", "diff", "--staged"], r.staged > 0);
+      launch("open-commit", "Last commit", "hunk show", null, ["hunk", "show"], true);
+      if (r.base) launch("open-branch", `Branch vs ${r.base}`, `hunk diff ${r.base}...HEAD`, r.ahead, ["hunk", "diff", `${r.base}...HEAD`], r.ahead > 0);
+      kids.push(h_flex().px(2).gap(8).items_center()
+        .child(div().text_size(11.5).text_color(t.dim).child("Open"))
+        .child(h_flex().p(2).gap(2).rounded(7).border(1).border_color(t.border)
+          .child(this.segment(t, "place-right", "Beside", this.place === "right", () => { this.place = "right"; save("place", "right"); }))
+          .child(this.segment(t, "place-tab", "New tab", this.place === "tab", () => { this.place = "tab"; save("place", "tab"); }))));
+    }
+    if (this.note) kids.push(div().px(2).text_size(11.5).text_color(this.note.ok ? t.ansi2 : t.blocked).child(this.note.text));
+    kids.push(h_flex().h(26).px(2).mt(6).gap(8).items_center().text_size(11.5).font_medium().text_color(t.muted)
+      .child(div().child("Open in Hunk"))
+      .child(div().text_color(t.dim).child(String(this.sessions.length))));
+    if (!this.sessions.length) kids.push(div().px(2).text_size(12).text_color(t.dim).whitespace_normal().child("No Hunk window is open. Pick one above."));
+    for (const s of this.sessions) {
+      // Enter on a window shows its files (or hides them), as a click does.
+      items.push({ open: (cx) => { this.open = this.open === s.sessionId ? null : s.sessionId; cx.notify(); }, section: kids.length });
+      kids.push(this.windowCard(t, s, sel()));
+    }
+    this.items = items;
+    this.nav.clamp(items.length);
+    return v_flex().id("review-root").size_full().min_w(0).min_h(0).bg(t.chrome).text_color(t.foreground).text_size(13)
+      .track_focus(this.nav.handle).on_mouse_down("left", () => this.nav.focus()).on_key_down((e, cx) => this.onKey(e, cx))
       .child(h_flex().flex_none().px(14).pt(14).pb(10).items_center().gap(8)
-        .child(div().text_size(13).font_semibold().child("Review"))
+        .child(div().text_size(13).font_semibold().text_color(kbd ? t.accent : t.foreground).child("Review"))
         .child(div().text_size(11.5).text_color(t.dim).child("in Hunk"))
         .child(div().flex_1())
         .child(div().id("review-refresh").size(24).flex_none().flex().items_center().justify_center().rounded(6).text_color(t.dim).cursor_pointer()
-          .tooltip("Refresh").accessibility_label("Refresh review")
+          .tooltip("Refresh (r)").accessibility_label("Refresh review")
           .hover((s) => s.bg(t.hover).text_color(t.foreground)).active((s) => s.bg(t.selected))
           .on_click((_e, cx) => {
             this.refreshRepo(cx);
             this.refreshSessions(cx);
           })
           .child(svg("mods/studio-review/refresh.svg").size(13))))
-      .child(v_flex().id("review-scroll").flex_1().min_h(0).px(12).pb(14).gap(10).overflow_y_scrollbar()
-        .when(this.remote, (el) => el.child(div().px(4).py(6).text_size(12).text_color(t.dim).whitespace_normal().child("This terminal is on another machine. Hunk reviews repositories on this computer only.")))
-        .when(!r && !this.remote, (el) => el.child(div().px(4).py(6).text_size(12).text_color(t.dim).whitespace_normal().child("The terminal you are in isn't inside a git repository.")))
-        .when(Boolean(r), (el) => el.child(h_flex().px(2).gap(8).items_center()
-          .child(div().flex_none().text_size(13).font_medium().child(base(r.root)))
-          .child(div().id("review-branch").flex_1().min_w(0).truncate().text_size(12).text_color(t.dim).tooltip(r.branch).child(r.branch))))
-        .when(Boolean(r), (el) => el.child(this.launcher(t, "open-working", "Working changes", "hunk diff --watch", r.changed, ["hunk", "diff", "--watch"], r.changed > 0)))
-        .when(Boolean(r), (el) => el.child(this.launcher(t, "open-staged", "Staged", "hunk diff --staged", r.staged, ["hunk", "diff", "--staged"], r.staged > 0)))
-        .when(Boolean(r), (el) => el.child(this.launcher(t, "open-commit", "Last commit", "hunk show", null, ["hunk", "show"], true)))
-        .when(Boolean(r) && Boolean(r.base), (el) => el.child(this.launcher(t, "open-branch", `Branch vs ${r.base}`, `hunk diff ${r.base}...HEAD`, r.ahead, ["hunk", "diff", `${r.base}...HEAD`], r.ahead > 0)))
-        .when(Boolean(r), (el) => el.child(h_flex().px(2).gap(8).items_center()
-          .child(div().text_size(11.5).text_color(t.dim).child("Open"))
-          .child(h_flex().p(2).gap(2).rounded(7).border(1).border_color(t.border)
-            .child(this.segment(t, "place-right", "Beside", this.place === "right", () => { this.place = "right"; save("place", "right"); }))
-            .child(this.segment(t, "place-tab", "New tab", this.place === "tab", () => { this.place = "tab"; save("place", "tab"); })))))
-        .when(Boolean(this.note), (el) => el.child(div().px(2).text_size(11.5).text_color(this.note.ok ? t.ansi2 : t.blocked).child(this.note.text)))
-        .child(h_flex().h(26).px(2).mt(6).gap(8).items_center().text_size(11.5).font_medium().text_color(t.muted)
-          .child(div().child("Open in Hunk"))
-          .child(div().text_color(t.dim).child(String(this.sessions.length))))
-        .when(!this.sessions.length, (el) => el.child(div().px(2).text_size(12).text_color(t.dim).whitespace_normal().child("No Hunk window is open. Pick one above.")))
-        .children(this.sessions.map((s) => this.windowCard(t, s))));
+      .child(v_flex().id("review-scroll").flex_1().min_h(0).px(12).pb(14).gap(10).overflow_y_scrollbar().track_scroll(this.scroll)
+        .children(kids))
+      .when(kbd, (el) => el.child(footer({ h_flex, div }, t,
+        [["↵ o", "open"], ["t", "beside or new tab"], ["r", "refresh"]], this.nav.help)));
   }
 }

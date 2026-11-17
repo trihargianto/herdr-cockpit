@@ -6,8 +6,9 @@
 // come from one `ps` every few seconds (a pane's shell and everything it started).
 
 import { View, div, svg, image } from "gpui-kit";
-import { v_flex, h_flex } from "gpui-base";
-import { agents, hc, exec, home, machines, panes, spaces, theme, window, settings, layout } from "herdr";
+import { v_flex, h_flex, ScrollHandle } from "gpui-base";
+import { agents, hc, exec, home, machines, panes, spaces, theme, window, settings, layout, props, run, nextCommand } from "herdr";
+import { Nav, footer } from "./nav.js";
 
 const ICONS = "mods/studio-workspace-chrome";
 const BARS = "[█▓▒░]";
@@ -120,7 +121,11 @@ function findNode(node, id) {
 function shown(id) {
   const root = layout();
   const panel = findNode(root, "panel");
-  return Boolean(panel && !panel.hidden && findNode(root, "panel-body")?.active === id);
+  if (!panel || panel.hidden) return false;
+  // A copy in the lower half of the panel (props.slot "lower") is shown when that stack is open on it.
+  const lower = props()?.slot === "lower";
+  const stack = findNode(root, lower ? "panel-lower" : "panel-body");
+  return Boolean(stack && !stack.hidden && stack.active === (lower ? `lower-${id}` : id));
 }
 
 export default class Usage extends View {
@@ -139,6 +144,17 @@ export default class Usage extends View {
     this.heights = load("monitor-heights", {}); // section title -> the height the person dragged it to
     this.drag = null; // { title, y, h } while a list's bottom edge is held
     this.sys = {}; // machine key -> { os, cores, ramKb }, read once per machine
+    // Keyboard: space cards, pane cards, then context rows, in screen order (rebuilt on each render).
+    this.nav = new Nav(cx, { slot: props()?.slot ?? null });
+    this.nav.watch(cx);
+    this.scroll = ScrollHandle.new();
+    this.items = [];
+    cx.spawn(async (cx) => {
+      for (;;) {
+        const c = await nextCommand();
+        if (this.nav.wants(c, props()?.slot)) { this.nav.focus(); cx.notify(); }
+      }
+    });
     // Reads once a minute, but only while this pane is the one shown (and at once when it opens).
     cx.timer.every(3000, (cx) => {
       if (!shown("usage")) return;
@@ -375,6 +391,31 @@ export default class Usage extends View {
         .child(div().h_full().rounded(2).w(`${Math.max(2, Math.round(frac * 100))}%`).bg(color)));
   }
 
+  onKey(e, cx) {
+    const it = () => this.items[this.nav.sel];
+    const open = () => it()?.open();
+    // [ and ] step through the machine tabs.
+    const step = (by) => {
+      const names = [null, ...machines().filter((m) => m.name).map((m) => m.name)];
+      if (names.length < 2) return;
+      const i = names.indexOf(this.shownMachine());
+      this.machine = names[(i + by + names.length) % names.length];
+      save("monitor-machine", this.machine);
+      this.nav.sel = 0;
+      this.monitor(cx);
+    };
+    const used = this.nav.key(e, this.items.length, {
+      enter: open, o: open, l: open,
+      r: () => { this.refresh(cx); this.monitor(cx); },
+      "[": () => step(-1), "]": () => step(1),
+    }, run);
+    if (!used) return;
+    cx.stop_propagation();
+    const sec = this.items[this.nav.sel]?.section;
+    if (sec != null) this.scroll.scroll_to_item(sec);
+    cx.notify();
+  }
+
   // The bottom edge of a list: drag it to make the list taller or shorter, with no upper limit.
   // The move and release are read on the whole scroll view (see render), so a fast drag cannot slip off.
   resizeHandle(t, title, height) {
@@ -397,7 +438,10 @@ export default class Usage extends View {
     // Spaces sit two to a row: narrower cards, so the name has its own line and the two meters stack.
     const wide = title !== "Spaces";
     const cardH = wide ? CARD : CARD2;
+    // A space card selects its space, a pane card focuses its pane (keyboard: see onKey).
     const card = (r) => v_flex().id(`mon-${title}-${r.id}`).flex_none().h(cardH).gap(wide ? 10 : 8).px(12).py(11).rounded(10).bg(t.raised)
+      .when(!folded && Boolean(this.reg?.(title === "Spaces" ? () => run("space.select", { id: r.id }) : () => run("pane.focus", { terminal: r.id }), 0)),
+        (c) => c.bg(t.selected).border(1).border_color(t.accent))
       .when(!wide, (c) => c.flex_1().min_w(0))
       .child(h_flex().gap(8).items_center()
         .when(Boolean(r.icon?.icon), (el) => el.child(r.icon.tint ? svg(r.icon.icon).size(14).flex_none().text_color(t.foreground) : image(r.icon.icon).size(14).flex_none()))
@@ -502,15 +546,28 @@ export default class Usage extends View {
     const d = this.data;
     const mono = settings().font_family ?? "JetBrains Mono";
     const here = this.shownMachine();
-    const contexts = [...(d?.contexts ?? [])].filter((c) => (c.address.includes("/") ? c.address.split("/")[0] : null) === here).sort((a, b) => b.context - a.context);
-    return v_flex().size_full().min_w(0).min_h(0).bg(t.chrome).text_color(t.foreground).text_size(13)
+    // Only agents still running: a closed session's last reading would sit here forever.
+    const live = new Set(agents().map((a) => a.address));
+    const contexts = [...(d?.contexts ?? [])].filter((c) => live.has(c.address) && (c.address.includes("/") ? c.address.split("/")[0] : null) === here).sort((a, b) => b.context - a.context);
+    // Keyboard rows, registered as they are drawn. `section` is the scroll area child that holds them.
+    const kbd = this.nav.focused();
+    const items = [];
+    this.reg = (open, section) => { items.push({ open, section }); return kbd && this.nav.sel === items.length - 1; };
+    const monitor = this.monitorCard(t);
+    const ctxSection = 1 + (d ? 0 : 1) + (here === null ? 2 : 0);
+    const ctxOn = contexts.map((c) => this.reg(() => run("agent.focus", { terminal: c.address }), ctxSection));
+    this.reg = null;
+    this.items = items;
+    this.nav.clamp(items.length);
+    return v_flex().id("usage-root").size_full().min_w(0).min_h(0).bg(t.chrome).text_color(t.foreground).text_size(13)
+      .track_focus(this.nav.handle).on_mouse_down("left", () => this.nav.focus()).on_key_down((e, cx) => this.onKey(e, cx))
       .child(h_flex().flex_none().px(14).pt(14).pb(10).items_center().gap(8)
-        .child(div().text_size(13).font_semibold().child("Monitoring"))
+        .child(div().text_size(13).font_semibold().text_color(kbd ? t.accent : t.foreground).child("Monitoring"))
         .child(div().flex_1())
         .when(Boolean(d?.at), (el) => el.child(div().text_size(11).text_color(t.dim).child(ago(now - d.at))))
         .child(this.iconButton(t, "usage-refresh", "mods/studio-usage/refresh.svg", "Refresh", (cx) => { this.refresh(cx); this.monitor(cx); })))
       .children(this.machineTabs(t) ? [this.machineTabs(t)] : [])
-      .child(v_flex().id("usage-scroll").flex_1().min_h(0).px(12).pb(14).gap(10).overflow_y_scrollbar()
+      .child(v_flex().id("usage-scroll").flex_1().min_h(0).px(12).pb(14).gap(10).overflow_y_scrollbar().track_scroll(this.scroll)
         .on_mouse_move((e, cx) => {
           if (!this.drag) return;
           this.heights = { ...this.heights, [this.drag.title]: Math.max(CARD, Math.round(this.drag.h + e.position.y - this.drag.y)) };
@@ -522,7 +579,7 @@ export default class Usage extends View {
           save("monitor-heights", this.heights);
           cx.notify();
         })
-        .child(this.monitorCard(t))
+        .child(monitor)
         .when(!d, (el) => el.child(div().px(4).py(8).text_color(t.dim).child("Reading the agents' status lines…")))
         // Account limits are not shown on another machine's tab for now.
         // Two to a row (flexbox, no grid); the odd one out keeps a half-width slot.
@@ -538,7 +595,11 @@ export default class Usage extends View {
             .when(contexts.length > CTX_SHOWN, (l) => l.h(CTX_ROW * CTX_SHOWN + CTX_GAP * (CTX_SHOWN - 1) + 24))
             .child(v_flex().id("ctx-scroll").gap(CTX_GAP).flex_1().min_h(0)
               .when(contexts.length > CTX_SHOWN, (l) => l.overflow_y_scrollbar())
-              .children(contexts.map((c) => v_flex().id(`ctx-${c.address}`).flex_none().h(CTX_ROW).gap(5)
+              .children(contexts.map((c, i) => v_flex().id(`ctx-${c.address}`).flex_none().h(CTX_ROW).gap(5).rounded(5).cursor_pointer()
+                .when(ctxOn[i], (el) => el.bg(t.selected))
+                .accessibility_label(`${c.title}, context ${c.context} percent full. Go to it`)
+                .hover((s) => s.bg(t.hover)).active((s) => s.bg(t.selected))
+                .on_click(() => run("agent.focus", { terminal: c.address }))
                 .child(h_flex().gap(8).items_center()
                   .child(c.icon?.icon ? (c.icon.tint ? svg(c.icon.icon).size(14).flex_none().text_color(t.foreground) : image(c.icon.icon).size(14).flex_none()) : div().size(14).flex_none())
                   .child(div().id(`ctx-title-${c.address}`).flex_1().min_w(0).truncate().text_size(12.5).tooltip(c.title).child(c.title))
@@ -548,6 +609,8 @@ export default class Usage extends View {
         .when(Boolean(d) && contexts.length === 0, (el) => el.child(div().px(4).py(6).text_size(12).text_color(t.dim).whitespace_normal()
           .child("No agent is showing a context meter. Run Claude with its status line, or Codex, in a terminal.")))
         .when(Boolean(d) && here === null, (el) => el.child(div().px(4).pt(2).text_size(11).text_color(t.dim).whitespace_normal()
-          .child("Read from the agents' own status lines, once a minute."))));
+          .child("Read from the agents' own status lines, once a minute."))))
+      .when(kbd, (el) => el.child(footer({ h_flex, div }, t,
+        [["↵ o", "go to it"], ["[ ]", "machine"], ["r", "refresh"]], this.nav.help)));
   }
 }

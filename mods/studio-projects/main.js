@@ -1,10 +1,11 @@
 // Projects: folders you always work in. Click one to focus its space, or open a new space there.
 // The list is kept in shared state ("studio.projects"), so it survives restarts and stays out of git.
 
-import { View, div } from "gpui-kit";
+import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, ScrollHandle } from "gpui-base";
 import * as fs from "fs/promises";
-import { spaces, panes, theme, run, home, notify, shared, setShared, nextCommand } from "herdr";
+import { spaces, panes, theme, run, home, notify, shared, setShared, nextCommand, exec, settings, props } from "herdr";
+import { Nav, footer } from "./nav.js";
 
 const KEY = "studio.projects";
 const HOME = home().replace(/\/$/, "");
@@ -17,6 +18,20 @@ const expand = (raw) => {
   const p = s === "~" ? HOME : s.startsWith("~/") ? HOME + s.slice(1) : s;
   return p.length > 1 ? p.replace(/\/+$/, "") : p;
 };
+// How well a project matches what you typed, or 0 for no match. The name counts more than the path;
+// letters in order with gaps match too ("mweb" finds mamikos-web), below a plain substring.
+function score(path, query) {
+  const q = query.trim().toLowerCase();
+  if (!q) return 1;
+  const name = base(path).toLowerCase(), full = abbrev(path).toLowerCase();
+  if (name.startsWith(q)) return 5;
+  if (name.includes(q)) return 4;
+  if (full.includes(q)) return 3;
+  const inOrder = (text) => { let i = 0; for (const ch of text) if (ch === q[i]) i++; return i === q.length; };
+  if (inOrder(name)) return 2;
+  return inOrder(full) ? 1 : 0;
+}
+
 const inside = (cwd, path) => Boolean(cwd) && (cwd === path || cwd.startsWith(path === "/" ? "/" : path + "/"));
 
 export default class Projects extends View {
@@ -34,22 +49,46 @@ export default class Projects extends View {
     this.hover = null;
 
     // Keyboard (vim-style). `sel` is the highlighted project, `cur` the highlighted folder in the tree.
-    this.handle = cx.focus_handle();
+    // The list view uses the shared vim keys (nav.js); the add tree keeps its own below.
+    this.nav = new Nav(cx, { slot: props()?.slot ?? null });
+    this.nav.watch(cx);
+    this.handle = this.nav.handle;
     this.listScroll = ScrollHandle.new();
     this.treeScroll = ScrollHandle.new();
-    this.sel = 0;
     this.cur = null;
     this.typing = false; // the path field has the keyboard
+    // `/` filters the list: the field shows while it has the keyboard or holds text.
+    this.query = "";
+    this.searching = false; // the filter field has the keyboard
+    this.findIn = InputState.new({ placeholder: "Filter projects  ( / )" });
+    this.findIn.on("change", (_e, cx) => {
+      const q = this.findIn.value();
+      if (q === this.query) return;
+      this.query = q;
+      this.sel = 0;
+      cx.notify();
+    });
+    // Enter keeps the filter and gives the list the keyboard, on the best match.
+    this.findIn.on("submit", (_e, cx) => { this.handle.focus(); cx.notify(); });
+    this.findIn.on("focus", (_e, cx) => { this.searching = true; cx.notify(); });
+    this.findIn.on("blur", (_e, cx) => {
+      this.searching = false;
+      cx.notify();
+    });
 
     this.pathIn = InputState.new({ placeholder: "Go to a folder, press Enter" });
     this.pathIn.on("submit", (_e, cx) => { this.jump(this.pathIn.value(), cx); this.handle.focus(); });
     this.pathIn.on("focus", (_e, cx) => { this.typing = true; cx.notify(); });
     this.pathIn.on("blur", (_e, cx) => { this.typing = false; cx.notify(); });
     this.checkMissing(cx);
+    // Focus handles report no blur: a cheap check redraws once when the keyboard leaves (or arrives),
+    // so the highlight and the key footer don't linger.
     // "focus" arrives when pane.go (Ctrl+B l) or the leader moves onto this panel.
     cx.spawn(async (cx) => {
       for (;;) {
         const c = await nextCommand();
+        // "studio-projects.search": open the filter line (as `/` does).
+        if (c === "search") { this.search(cx); continue; }
         if (c === "focus") { this.handle.focus(); cx.notify(); }
       }
     });
@@ -166,6 +205,41 @@ export default class Projects extends View {
     run("space.new", { name: base(path), folder: path });
   }
 
+  // A space set up for work: Agent (Claude), Edit (Neovim) and Runner (a shell, for the dev server)
+  // tabs, all in the project folder. `herdr-app do` reports the new space's id for the next two tabs.
+  start(path, cx) {
+    const hit = this.spaceFor(path);
+    if (hit) return run("space.select", { id: hit.id });
+    cx.spawn(async () => {
+      if (!(await fs.exists(path))) {
+        notify({ title: "Folder not found", body: abbrev(path), level: "warning" });
+        return;
+      }
+      try {
+        const made = await exec("herdr-app", ["do", "space.new", JSON.stringify({ name: base(path), folder: path, tab: "Agent", argv: ["claude"] })], { cwd: path, timeout: 15000 });
+        const space = JSON.parse(made.stdout || "{}").space;
+        if (made.code !== 0 || !space) throw new Error((made.stderr || made.stdout).trim());
+        await exec("herdr-app", ["do", "tab.new", JSON.stringify({ space, name: "Edit", folder: path, argv: ["nvim"], focus: false })], { cwd: path, timeout: 15000 });
+        await exec("herdr-app", ["do", "tab.new", JSON.stringify({ space, name: "Runner", folder: path, focus: false })], { cwd: path, timeout: 15000 });
+      } catch (e) {
+        notify({ title: "Couldn't start the project", body: String(e.message ?? e).split("\n")[0], level: "error" });
+      }
+    });
+  }
+
+  // Removing takes a second press (click or x) within three seconds. Returns true once removed.
+  askRemove(path, cx) {
+    if (this.removing !== path) {
+      this.removing = path;
+      cx.notify();
+      cx.timer.after(3000, (cx) => { if (this.removing === path) { this.removing = null; cx.notify(); } });
+      return false;
+    }
+    this.removing = null;
+    this.remove(path, cx);
+    return true;
+  }
+
   remove(path, cx) {
     this.list = this.list.filter((p) => p !== path);
     this.missing.delete(path);
@@ -180,20 +254,48 @@ export default class Projects extends View {
     return this.flat().filter((r) => !r.note);
   }
 
-  listKey(k, shift, cx) {
-    const n = this.list.length;
-    if (k === "j" || k === "down") this.sel = Math.min(n - 1, this.sel + 1);
-    else if (k === "k" || k === "up") this.sel = Math.max(0, this.sel - 1);
-    else if (k === "g" && shift) this.sel = n - 1;
-    else if (k === "g") this.sel = 0;
-    else if ((k === "enter" || k === "l" || k === "o") && n) this.open(this.list[this.sel]);
-    else if (k === "x" && n) { this.remove(this.list[this.sel], cx); this.sel = Math.min(this.sel, this.list.length - 1); }
-    else if (k === "a" || (k === "=" && shift)) this.openAdd(cx, true);
-    else if (k === "h" || k === "escape") run("pane.go", { direction: "left" });
-    else return false;
+  // `sel` is the list's highlighted row; Nav keeps it.
+  // The projects shown: all of them, or the matches for the filter, best first.
+  view() {
+    if (!this.query.trim()) return this.list;
+    return this.list.map((p, i) => ({ p, i, s: score(p, this.query) })).filter((x) => x.s > 0)
+      .sort((a, b) => b.s - a.s || a.i - b.i).map((x) => x.p);
+  }
+
+  // `/`: the filter field takes the keyboard. It is always on screen (a field that appears and is
+  // focused in the same moment loses the keyboard), and it's focused here, not from a timer.
+  search(cx) {
+    this.findIn.focus();
+    cx.notify();
+  }
+
+  clearSearch(cx) {
+    this.query = "";
+    this.findIn.set_value("");
+    this.sel = 0;
+    cx.notify();
+  }
+
+  get sel() { return this.nav.sel; }
+  set sel(v) { this.nav.sel = v; }
+
+  listKey(e, cx) {
+    const list = this.view();
+    const n = list.length;
+    const at = () => list[this.sel];
+    // Esc with a filter on clears it first; the next Esc leaves the panel.
+    if (e.key === "escape" && this.query) { this.clearSearch(cx); return true; }
+    const handled = this.nav.key(e, n, {
+      enter: () => n && this.open(at()), l: () => n && this.open(at()), o: () => n && this.open(at()),
+      s: () => n && this.start(at(), cx),
+      x: () => { if (n && this.askRemove(at(), cx)) this.sel = Math.min(this.sel, this.view().length - 1); },
+      dd: () => { if (n) { this.remove(at(), cx); this.sel = Math.min(this.sel, this.view().length - 1); } },
+      "/": () => this.search(cx),
+      a: () => this.openAdd(cx, true), "+": () => this.openAdd(cx, true),
+    }, run);
     this.sel = Math.max(0, this.sel);
-    if (n) this.listScroll.scroll_to_item(this.sel);
-    return true;
+    if (handled && n) this.listScroll.scroll_to_item(this.sel);
+    return handled;
   }
 
   treeKey(k, shift, cx) {
@@ -228,20 +330,38 @@ export default class Projects extends View {
   }
 
   onKey(e, cx) {
+    if (this.searching) {
+      // In the filter field: Esc clears it and gives the list the keyboard; the arrows, Ctrl+N/P and
+      // Ctrl+J/K move through the matches without leaving the field, as in fzf.
+      const k = e.keystroke;
+      const n = this.view().length;
+      if (k === "escape") { this.clearSearch(cx); this.handle.focus(); cx.stop_propagation(); return; }
+      if (k === "down" || k === "ctrl-n" || k === "ctrl-j") { this.sel = Math.min(n - 1, this.sel + 1); }
+      else if (k === "up" || k === "ctrl-p" || k === "ctrl-k") { this.sel = Math.max(0, this.sel - 1); }
+      else return;
+      if (n) this.listScroll.scroll_to_item(this.sel);
+      cx.stop_propagation();
+      cx.notify();
+      return;
+    }
     if (this.typing) {
       // In the path field only Esc is ours: back to the tree.
       if (e.key === "escape") { this.handle.focus(); cx.stop_propagation(); }
       return;
     }
     const m = e.modifiers;
+    if (!this.adding) {
+      if (this.listKey(e, cx)) { cx.stop_propagation(); cx.notify(); }
+      return;
+    }
     if (m.control || m.platform || m.alt) return;
-    const handled = this.adding ? this.treeKey(e.key, m.shift, cx) : this.listKey(e.key, m.shift, cx);
+    const handled = this.treeKey(e.key, m.shift, cx);
     if (handled) { cx.stop_propagation(); cx.notify(); }
   }
 
-  header(t, title, right) {
+  header(t, title, focused, right) {
     return h_flex().flex_none().px(14).pt(14).pb(6).items_center().gap(8)
-      .child(div().font_semibold().text_size(13).child(title))
+      .child(div().font_semibold().text_size(13).text_color(focused ? t.accent : t.foreground).child(title))
       .child(div().flex_1())
       .child(right);
   }
@@ -258,7 +378,7 @@ export default class Projects extends View {
     const gone = this.missing.has(path);
     return h_flex().id(`project-${path}`).w_full().min_w(0).h(44).flex_none()
       .px(7).gap(8).items_center().rounded(3).cursor_pointer()
-      .when(kbd && i === this.sel, (el) => el.bg(t.selected))
+      .when((kbd || this.searching) && i === this.sel, (el) => el.bg(t.selected))
       .hover((s) => s.bg(t.hover)).active((s) => s.bg(t.selected))
       .tooltip(gone ? `${path}\nFolder not found` : path)
       .accessibility_label(`${base(path)}, ${abbrev(path)}${open ? ", space open" : ""}`)
@@ -272,21 +392,49 @@ export default class Projects extends View {
       .child(v_flex().flex_1().min_w(0).gap(2)
         .child(div().truncate().text_color(gone ? t.dim : t.foreground).child(base(path)))
         .child(div().truncate().text_size(11).text_color(t.dim).child(abbrev(path))))
+      .when(!open && !gone && (this.hover === path || (kbd && i === this.sel)), (el) => el.child(div().id(`project-start-${path}`).flex_none().h(22).px(7)
+        .flex().items_center().rounded(4).border(1).border_color(t.border).bg(t.chrome).text_size(11).text_color(t.foreground).cursor_pointer()
+        .tooltip("New space with Agent (Claude), Edit (Neovim) and Runner tabs").accessibility_label(`Start ${base(path)}: agent, editor and runner tabs`)
+        .hover((s) => s.bg(t.hover)).active((s) => s.bg(t.selected))
+        .on_click((_e, cx2) => { cx2.stop_propagation(); this.start(path, cx2); })
+        .child("Start")))
       .child(div().flex_none().w(22).h(22)
-        .when(this.hover === path || (kbd && i === this.sel), (el) => el.child(this.iconButton(`project-x-${path}`, `Remove ${base(path)}`, "×", t, (_e, cx2) => {
+        .when(this.hover === path || (kbd && i === this.sel) || this.removing === path, (el) => el.child(this.iconButton(`project-x-${path}`,
+          this.removing === path ? `Click again to remove ${base(path)}` : `Remove ${base(path)}`, this.removing === path ? "?" : "×", t, (_e, cx2) => {
           cx2.stop_propagation();
-          this.remove(path, cx2);
+          this.askRemove(path, cx2);
         }))));
   }
 
   renderList(t, cx) {
     const kbd = this.handle.is_focused();
+    const list = this.view();
+    this.nav.clamp(list.length);
+    // Always drawn: a field that is on screen before it's focused takes the keyboard reliably.
+    const filtering = this.list.length > 0;
     return v_flex().size_full().min_w(0).min_h(0).bg(t.chrome).text_color(t.foreground).text_size(12.5)
-      .child(this.header(t, "Projects", this.iconButton("projects-add", "Add projects", "+", t, (_e, cx) => this.openAdd(cx))))
+      .child(this.header(t, "Projects", kbd || this.searching, h_flex().gap(2).items_center()
+        .when(Boolean(this.query) && !this.searching, (el) => el.child(div().text_size(11).text_color(t.dim).child(`${list.length} of ${this.list.length}`)))
+        .child(this.iconButton("projects-add", "Add projects (a)", "+", t, (_e, cx) => this.openAdd(cx)))))
+      // The filter line, vim's `/`: shown while typing or while a filter is on.
+      .when(filtering, (el) => el.child(h_flex().id("projects-filter").flex_none().mx(12).mb(6).h(30).px(9).gap(6).items_center().rounded(7).border(1)
+        .border_color(this.searching ? t.accent : t.border).bg(t.background).cursor_text()
+        .on_mouse_down("left", (_e, cx) => { cx.stop_propagation(); this.search(cx); })
+        .child(svg("mods/studio-workspace-chrome/search.svg").size(12).flex_none().text_color(this.searching ? t.accent : t.dim))
+        .child(div().flex_1().min_w(0).child(Input.new(this.findIn).w_full().text_size(12.5).text_color(t.foreground)))
+        .when(Boolean(this.query), (el) => el.child(div().id("projects-filter-clear").flex_none().size(18).flex().items_center().justify_center().rounded(4)
+          .text_color(t.dim).cursor_pointer().tooltip("Clear filter (Esc)").accessibility_label("Clear filter")
+          .hover((s) => s.bg(t.hover).text_color(t.foreground)).active((s) => s.bg(t.selected))
+          .on_mouse_down("left", (_e, cx) => { cx.stop_propagation(); this.clearSearch(cx); })
+          .child("×")))))
       .child(v_flex().id("projects-scroll").flex_1().min_h(0).px(12).pb(14).gap(2).overflow_y_scrollbar().track_scroll(this.listScroll)
-        .children(this.list.map((p, i) => this.row(p, t, cx, i, kbd)))
-        .when(!this.list.length, (el) => el.child(div().px(2).py(14).text_color(t.muted).child("No projects yet. Press + to add some"))))
-      .when(kbd, (el) => el.child(this.hints(t, ["j k move", "↵ open", "x remove", "a add", "h back"])));
+        .children(list.map((p, i) => this.row(p, t, cx, i, kbd)))
+        .when(!this.list.length, (el) => el.child(div().px(2).py(14).text_color(t.muted).child("No projects yet. Press + to add some")))
+        .when(this.list.length > 0 && !list.length, (el) => el.child(v_flex().px(2).py(14).gap(4)
+          .child(div().text_color(t.muted).child(`No project matches "${this.query.trim()}"`))
+          .child(div().text_size(12).text_color(t.dim).child("Esc clears the filter.")))))
+      .when(this.searching, (el) => el.child(footer({ h_flex, div }, t, [["↵", "keep filter, back to list"], ["↓ ↑ ^n ^p", "move"], ["Esc", "clear"]], false)))
+      .when(kbd, (el) => el.child(footer({ h_flex, div }, t, [["/", "filter"], ["↵ o l", "open"], ["s", "start"], ["a", "add"], ["x", "remove (twice)"], ["dd", "remove now"]], this.nav.help)));
   }
 
   hints(t, items) {
@@ -350,11 +498,11 @@ export default class Projects extends View {
     const kbd = this.handle.is_focused();
     const atTop = this.root === "/";
     return v_flex().size_full().min_w(0).min_h(0).bg(t.chrome).text_color(t.foreground).text_size(12.5)
-      .child(this.header(t, "Add projects", this.iconButton("projects-cancel", "Cancel", "×", t, (_e, cx) => { this.adding = false; cx.notify(); })))
+      .child(this.header(t, "Add projects", false, this.iconButton("projects-cancel", "Cancel", "×", t, (_e, cx) => { this.adding = false; cx.notify(); })))
       .child(v_flex().flex_none().px(12).pb(8).gap(4)
         .child(h_flex().gap(4).items_center()
           .child(this.iconButton("projects-up", "Up one folder", "↑", t, (_e, cx) => { if (!atTop) this.jump(parent(this.root), cx); }))
-          .child(div().flex_1().min_w(0).child(Input.new(this.pathIn).w_full().text_size(12.5).text_color(t.foreground)))
+          .child(div().flex_1().min_w(0).child(Input.new(this.pathIn).w_full().text_size(12.5).text_color(t.foreground).on_mouse_down("left", (_e, cx) => cx.stop_propagation())))
           .child(this.iconButton("projects-home", "Home", "~", t, (_e, cx) => this.jump(HOME, cx))))
         .child(h_flex().items_center().gap(8)
           .child(div().flex_1().text_size(11).text_color(this.invalid ? t.ansi1 : t.dim)
@@ -376,6 +524,8 @@ export default class Projects extends View {
   render(cx) {
     const t = theme();
     return div().id("projects-root").size_full().track_focus(this.handle)
+      // A click anywhere in the panel gives it the keyboard (rows still do their own thing).
+      .on_mouse_down("left", () => this.handle.focus())
       .on_key_down((e, cx) => this.onKey(e, cx))
       .child(this.adding ? this.renderAdd(t, cx) : this.renderList(t, cx));
   }

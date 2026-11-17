@@ -2,13 +2,16 @@
 // agent is doing, where, on which branch and for how long.
 
 import { View, div, image, svg } from "gpui-kit";
-import { v_flex, h_flex } from "gpui-base";
-import { agents, terminals, panes, spaces, run, theme, setAgentOrder, layout, settings } from "herdr";
+import { v_flex, h_flex, ScrollHandle } from "gpui-base";
+import { agents, terminals, panes, spaces, run, theme, setAgentOrder, layout, settings, nextCommand } from "herdr";
+import { Nav, footer } from "./nav.js";
 
 const ICONS = "mods/studio-workspace-chrome";
 const ORDER = ["blocked", "done", "working", "idle"];
 const LABELS = { blocked: "Needs you", done: "Done", working: "Working", idle: "Idle" };
 const RANK = { blocked: 4, done: 3, working: 2, idle: 1 };
+// Animated characters: one full two-frame cycle, in ms. Typing is brisk; the "!" blinks slower.
+const FLIPS = { working: 700, blocked: 1100 };
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -69,10 +72,30 @@ export default class Dashboard extends View {
     // looking at a finished agent is not the agent doing anything.
     this.changed = load("changed", {});
     this.hovered = null;
+    // Keyboard (vim keys, nav.js): j/k over the agents as listed. The terminal is to the right.
+    this.nav = new Nav(cx, { leave: "right" });
+    this.nav.watch(cx);
+    this.scroll = ScrollHandle.new();
+    this.list = []; // the agents in display order, from the last render
+    this.at = {}; // address -> its index among the scroll area's children
+    cx.spawn(async (cx) => {
+      for (;;) {
+        const c = await nextCommand();
+        if (c === "focus") {
+          const here = this.list.findIndex((a) => a.focused);
+          if (here >= 0) this.nav.sel = here;
+          this.nav.focus();
+          cx.notify();
+        }
+      }
+    });
+    // Focus handles report no blur: a cheap check redraws once when the keyboard leaves (or arrives),
+    // so the highlight and the key footer don't linger.
     // The address just copied, shown as "Copied" for a moment.
     this.copied = null;
     // Durations read in minutes: redraw for them twice a minute, nothing else polls.
-    cx.timer.every(30000, (cx) => cx.notify());
+    // (The rail shows no times, so it skips these.)
+    cx.timer.every(30000, (cx) => { if (!narrow()) cx.notify(); });
   }
 
   track(list, tabs, now) {
@@ -123,6 +146,21 @@ export default class Dashboard extends View {
     return box.child(div().size(7).rounded(4).border(1.5).border_color(t.idle ?? t.dim));
   }
 
+  // The row's character (art/agent-sprite). Drawn at 2x, so 24pt on a Retina screen is one
+  // image pixel per screen pixel. Busy states flip two frames natively: the second frame sits
+  // on the first and loops its opacity far past 0..1 (-10..11), which clamps into a switch
+  // shorter than one animation frame. (A GIF only advances when the view redraws: it froze here.)
+  sprite(a, quiet) {
+    const base = "mods/studio-dashboard/sprites";
+    const flip = FLIPS[a.status];
+    if (!flip) return image(`${base}/${a.status === "done" ? "done" : "idle"}.png`).w(24).h(25).flex_none()
+      .when(quiet, (el) => el.opacity(0.55));
+    const frame = (i) => image(`${base}/${a.status}-${i}.png`).absolute().top(0).left(0).w(24).h(25);
+    return div().relative().w(24).h(25).flex_none()
+      .child(frame(0))
+      .child(frame(1).loop("opacity", { from: -10, to: 11, period: flip, easing: "linear" }));
+  }
+
   iconButton(t, id, path, label, action) {
     return div().id(id).size(22).flex_none().flex().items_center().justify_center().rounded(5)
       .text_color(t.dim).cursor_pointer().tooltip(label).accessibility_label(label)
@@ -159,6 +197,24 @@ export default class Dashboard extends View {
       .child(address);
   }
 
+  onKey(e, cx) {
+    const a = () => this.list[this.nav.sel];
+    const go = () => a() && run("pane.focus", { pane: a().pane });
+    const used = this.nav.key(e, this.list.length, {
+      enter: go, l: go, o: go,
+      p: () => a() && run("terminal.peek", { terminal: a().address }),
+      P: () => a() && run("terminal.pin", { terminal: a().address, pinned: !a().pinned }),
+      // The status filter: all, then each state in turn.
+      f: () => { const i = ORDER.indexOf(this.filter); this.filter = i === ORDER.length - 1 ? null : ORDER[i + 1]; this.nav.sel = 0; },
+      s: () => { this.setScope(this.scope === "all" ? "space" : "all"); this.nav.sel = 0; },
+    }, run);
+    if (!used) return;
+    cx.stop_propagation();
+    const at = this.at[this.list[this.nav.sel]?.address];
+    if (at != null) this.scroll.scroll_to_item(at);
+    cx.notify();
+  }
+
   setScope(scope) {
     this.scope = scope;
     save("scope", scope);
@@ -169,7 +225,7 @@ export default class Dashboard extends View {
     save("folded", [...this.folded]);
   }
 
-  // mixed: the row sits under Pinned, where statuses mix and need their mark.
+  // The character on the left shows the status, so rows under Pinned (mixed statuses) need no extra mark.
   row(t, a, ctx, mixed) {
     const tab = ctx.tabs.get(a.tab);
     const pane = ctx.panes.get(a.pane);
@@ -178,7 +234,9 @@ export default class Dashboard extends View {
     // The Spaces list already shows each space's branch: only say it when it differs.
     const branch = pane?.branch && pane.branch !== ctx.spaceBranch.get(a.space) ? pane.branch : null;
     const at = this.since(a);
-    const hovered = this.hovered === a.address;
+    // The keyboard's row shows its actions too, as a hover does.
+    const keyed = this.kbdAddr === a.address;
+    const hovered = this.hovered === a.address || keyed;
     const quiet = a.status === "idle" && !a.focused;
     const kids = ctx.kids(a.address);
     const state = `${LABELS[a.status] ?? a.status}${at ? ` for ${ago(ctx.now - at)}` : ""}`;
@@ -192,10 +250,11 @@ export default class Dashboard extends View {
         this.hovered = null;
       }));
 
-    const card = v_flex().id(`agent-${a.address}`).w_full().flex_none().px(8).py(6).gap(3).rounded(7)
+    const card = h_flex().id(`agent-${a.address}`).w_full().flex_none().pl(6).pr(8).py(6).gap(8).items_center().rounded(7)
       .cursor_pointer()
       .accessibility_label(`${[`${name} (${a.address})`, state, where].filter(Boolean).join(", ")}. Focus terminal`)
       .when(a.focused, (el) => el.bg(t.selected))
+      .when(keyed, (el) => el.border_1().border_color(t.accent))
       .hover((s) => s.bg(a.focused ? t.selected : t.hover))
       .active((s) => s.bg(t.selected))
       .on_hover((on, cx) => {
@@ -204,19 +263,20 @@ export default class Dashboard extends View {
         cx.notify();
       })
       .on_click(() => run("pane.focus", { pane: a.pane }))
+      .child(this.sprite(a, quiet))
+      .child(v_flex().flex_1().min_w(0).gap(3)
       .child(h_flex().h(22).gap(8).items_center()
         .child(icon(a.program, 16, quiet ? t.muted : t.foreground))
         .child(div().id(`title-${a.address}`).flex_1().min_w(0).truncate().tooltip(name)
           .text_color(quiet ? t.muted : t.foreground).when(a.status === "blocked", (el) => el.font_medium()).child(name))
         .when(hovered, (el) => el.child(actions))
-        .when(!hovered && Boolean(at), (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).tooltip(state).child(ago(ctx.now - at))))
-        .when(mixed, (el) => el.child(this.mark(t, a.status))))
+        .when(!hovered && Boolean(at), (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).tooltip(state).child(ago(ctx.now - at)))))
       .child(h_flex().pl(24).gap(5).items_center().text_size(11.5).text_color(t.dim)
         .child(this.address(t, a.address))
         .when(Boolean(where), (el) => el.child(div().id(`where-${a.address}`).min_w(0).truncate().tooltip(where).child(where)))
         .when(Boolean(branch), (el) => el
           .child(svg(`${ICONS}/git-branch.svg`).size(11).flex_none().ml(3))
-          .child(div().id(`branch-${a.address}`).flex_1().min_w(0).truncate().tooltip(branch).child(branch))));
+          .child(div().id(`branch-${a.address}`).flex_1().min_w(0).truncate().tooltip(branch).child(branch)))));
 
     if (!kids.length) return [card];
     return [card, ...kids.map((k, i) => this.kidRow(t, k, i === kids.length - 1, ctx))];
@@ -303,13 +363,34 @@ export default class Dashboard extends View {
         .child(action.label)));
   }
 
+  // The rail: the same agents as the full list (sub-agents under their parent stay out), most urgent
+  // first and, within a state, in the list's time order. The » on top unfolds the sidebar: on macOS
+  // the window buttons take the top row's toggle away.
   rail(t, list) {
-    const sorted = [...list].sort((x, y) => (RANK[y.status] ?? 0) - (RANK[x.status] ?? 0));
+    const listed = new Set(list.map((a) => a.address));
+    const nested = new Set(terminals().filter((k) => k.parent && k.state === "live" && listed.has(k.parent)).map((k) => k.address));
+    const top = list.filter((a) => a.pinned || !nested.has(a.address));
+    const sorted = [...top].sort((x, y) => (RANK[y.status] ?? 0) - (RANK[x.status] ?? 0)
+      || (x.status === "blocked" ? (this.since(x) ?? 0) - (this.since(y) ?? 0) : (this.since(y) ?? 0) - (this.since(x) ?? 0)) || y.seq - x.seq);
     setAgentOrder(sorted.map((a) => a.address));
-    return v_flex().id("agents-rail").size_full().min_h(0).bg(t.chrome).items_center().gap(4).py(8).overflow_y_scrollbar()
+    this.list = sorted;
+    this.nav.clamp(sorted.length);
+    const kbd = this.nav.focused();
+    const keyed = kbd ? sorted[this.nav.sel]?.address : null;
+    return v_flex().id("agents-rail")
+      .track_focus(this.nav.handle).on_mouse_down("left", () => this.nav.focus()).on_key_down((e, cx) => this.onKey(e, cx)).size_full().min_h(0).bg(t.chrome).items_center().gap(4).py(8).overflow_y_scrollbar()
+      .child(div().id("rail-expand").w(32).h(24).flex_none().flex().items_center().justify_center().rounded(6).text_color(t.dim).cursor_pointer()
+        .tooltip("Unfold the sidebar (Cmd+B)").accessibility_label("Unfold the sidebar")
+        .hover((s) => s.bg(t.hover).text_color(t.foreground)).active((s) => s.bg(t.selected))
+        .on_click(() => run("studio-tabs.sidebar"))
+        .child(svg("mods/studio-workspace-chrome/chevron-right.svg").size(13)))
+      .when(!sorted.length, (el) => el.child(div().id("rail-empty").w(32).h(24).flex().items_center().justify_center().text_color(t.dim).tooltip("No agents running").child("–")))
       .children(sorted.map((a) => v_flex().id(`rail-${a.address}`).w(32).py(5).gap(4).flex_none().items_center().rounded(7)
         .cursor_pointer().tooltip(`${a.address} · ${clean(a.title) || a.program?.name || "Agent"} · ${LABELS[a.status] ?? a.status}`)
+        .accessibility_label(`${clean(a.title) || a.program?.name || "Agent"}, ${LABELS[a.status] ?? a.status}. Go to it`)
         .when(a.focused, (el) => el.bg(t.selected))
+        .when(keyed === a.address, (el) => el.border_1().border_color(t.accent))
+        .when(a.status === "idle" && !a.focused, (el) => el.opacity(0.55))
         .hover((s) => s.bg(t.hover)).active((s) => s.bg(t.selected))
         .on_click(() => run("pane.focus", { pane: a.pane }))
         .child(icon(a.program, 16, t.foreground))
@@ -365,10 +446,25 @@ export default class Dashboard extends View {
     }
     setAgentOrder(groups.flatMap((g) => g.members.map((a) => a.address)));
 
-    const rows = groups.flatMap((g) => [
-      this.header(t, g.id, g.label, g.color, g.members.length),
-      ...(this.folded.has(g.id) ? [] : g.members.flatMap((a) => this.row(t, a, ctx, g.id === "pinned"))),
-    ]);
+    // The keyboard walks the agents shown (folded groups are skipped), in this order.
+    const kbd = this.nav.focused();
+    const walk = groups.flatMap((g) => (this.folded.has(g.id) ? [] : g.members));
+    const was = this.list[this.nav.sel]?.address;
+    this.list = walk;
+    if (was) { const i = walk.findIndex((a) => a.address === was); if (i >= 0) this.nav.sel = i; }
+    this.nav.clamp(walk.length);
+    this.kbdAddr = kbd ? walk[this.nav.sel]?.address : null;
+
+    const rows = [];
+    this.at = {};
+    for (const g of groups) {
+      rows.push(this.header(t, g.id, g.label, g.color, g.members.length));
+      if (this.folded.has(g.id)) continue;
+      for (const a of g.members) {
+        this.at[a.address] = rows.length;
+        rows.push(...[].concat(this.row(t, a, ctx, g.id === "pinned")));
+      }
+    }
 
     let emptyState = null;
     if (!everyone.length) emptyState = this.empty(t, "No agents yet", "Agents appear here once they report a status.");
@@ -377,11 +473,13 @@ export default class Dashboard extends View {
     else if (!shown.length) emptyState = this.empty(t, `No ${LABELS[this.filter].toLowerCase()} agents`, null,
       { label: "Clear filter", run: () => { this.filter = null; } });
 
-    return v_flex().size_full().min_w(0).min_h(0).bg(t.chrome).text_color(t.foreground).text_size(13)
+    if (emptyState) for (const k of Object.keys(this.at)) this.at[k] += 1;
+    return v_flex().id("agents-root").size_full().min_w(0).min_h(0).bg(t.chrome).text_color(t.foreground).text_size(13)
+      .track_focus(this.nav.handle).on_mouse_down("left", () => this.nav.focus()).on_key_down((e, cx) => this.onKey(e, cx))
       .border_t(1).border_color(t.border)
       .child(v_flex().flex_none().px(8).pt(10).pb(8).gap(8)
         .child(h_flex().px(8).gap(6).items_center()
-          .child(div().text_size(11.5).font_medium().text_color(t.dim).child("Agents"))
+          .child(div().text_size(11.5).font_medium().text_color(kbd ? t.accent : t.dim).child("Agents"))
           .child(div().id("scope-label").min_w(0).flex_1().truncate().text_size(11).text_color(t.dim)
             .tooltip(all ? "Across all spaces" : space?.name ?? "No space")
             .child(`· ${all ? "all spaces" : space?.name ?? "no space"}`))
@@ -400,8 +498,10 @@ export default class Dashboard extends View {
           })
           .child(div().flex_1().child(`${elsewhere} ${elsewhere === 1 ? "needs" : "need"} you in other spaces`))
           .child(svg(`${ICONS}/chevron-right.svg`).size(11).flex_none()))))
-      .child(v_flex().id("agents-scroll").flex_1().min_h(0).px(8).pb(8).overflow_y_scrollbar()
+      .child(v_flex().id("agents-scroll").flex_1().min_h(0).px(8).pb(8).overflow_y_scrollbar().track_scroll(this.scroll)
         .when(Boolean(emptyState), (el) => el.child(emptyState))
-        .children(rows));
+        .children(rows))
+      .when(kbd, (el) => el.child(footer({ h_flex, div }, t,
+        [["↵ l", "go"], ["p", "peek"], ["P", "pin"], ["f", "filter"], ["s", "space or all"], ["^k", "spaces"]], this.nav.help)));
   }
 }

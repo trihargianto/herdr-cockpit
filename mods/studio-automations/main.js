@@ -1,6 +1,7 @@
 import { View, div } from "gpui-kit";
-import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { exec, appHome, theme, layout, window, nextCommand } from "herdr";
+import { v_flex, h_flex, InputState, Input, ScrollHandle } from "gpui-base";
+import { exec, appHome, theme, layout, window, nextCommand, run, props } from "herdr";
+import { Nav, footer } from "./nav.js";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -21,10 +22,16 @@ export default class Automations extends View {
     this.name = InputState.new({ placeholder: "Daily backup" });
     this.schedule = InputState.new({ placeholder: "0 9 * * *" });
     this.command = InputState.new({ placeholder: "/absolute/path/to/script.sh" });
+    // Keyboard: the jobs shown, in order (rebuilt on each render).
+    this.nav = new Nav(cx, { slot: props()?.slot ?? null });
+    this.nav.watch(cx);
+    this.scroll = ScrollHandle.new();
+    this.items = [];
     this.refresh(cx);
     cx.spawn(async cx => {
       for (;;) {
         const command = await nextCommand();
+        if (this.nav.wants(command, props()?.slot)) this.nav.focus();
         if (command === "new") this.edit(null, cx);
         if (command === "refresh") this.refresh(cx);
         cx.notify();
@@ -37,7 +44,11 @@ export default class Automations extends View {
   }
 
   request(request, cx) {
-    if (this.busy) return;
+    // A change made while the background list is still running waits for it instead of being dropped.
+    if (this.busy) {
+      if (request.action !== "list") this.pending = request;
+      return;
+    }
     this.busy = true;
     const background = request.action === "list";
     const previousError = this.error;
@@ -57,14 +68,20 @@ export default class Automations extends View {
         this.revision = data.revision;
         this.error = null;
         this.ready = true;
-        if (request.action === "save") this.form = null;
+        // The list takes the keyboard back once the form closes.
+        if (request.action === "save") { this.form = null; this.nav.focus(); }
         if (changed || !background) this.confirm = null;
       } catch (error) {
         this.error = String(error.message ?? error);
       }
       this.busy = false;
       this.saving = false;
+      // Home and the status bar show the next run: tell the feed after a change.
+      if (!background && !this.error) run("studio-tabs.refresh");
       if (!background || changed || previousError !== this.error) cx.notify();
+      const next = this.pending;
+      this.pending = null;
+      if (next) this.request(next, cx);
     });
   }
 
@@ -78,6 +95,27 @@ export default class Automations extends View {
     this.command.set_value(job?.command ?? "");
     this.error = null;
     this.name.focus();
+    cx.notify();
+  }
+
+  onKey(e, cx) {
+    // A form field has the keyboard: its keys are its own.
+    if (!this.nav.focused()) return;
+    const it = () => this.items[this.nav.sel];
+    const used = this.nav.key(e, this.items.length, {
+      enter: () => { const j = it()?.job; if (j) this.edit(j, cx); },
+      e: () => { const j = it()?.job; if (j) this.edit(j, cx); },
+      a: () => this.edit(null, cx),
+      space: () => { const j = it()?.job; if (j) this.request({ action: "toggle", id: j.id, revision: this.revision }, cx); },
+      t: () => { const j = it()?.job; if (j) this.request({ action: "toggle", id: j.id, revision: this.revision }, cx); },
+      dd: () => { const j = it()?.job; if (j) this.request({ action: "delete", id: j.id, revision: this.revision }, cx); },
+      f: () => { this.filter = { all: "enabled", enabled: "disabled", disabled: "all" }[this.filter]; this.nav.sel = 0; },
+      r: () => this.refresh(cx),
+    }, run);
+    if (!used) return;
+    cx.stop_propagation();
+    const sec = this.items[this.nav.sel]?.section;
+    if (sec != null) this.scroll.scroll_to_item(sec);
     cx.notify();
   }
 
@@ -96,7 +134,7 @@ export default class Automations extends View {
     return v_flex().gap(4)
       .child(div().text_size(11).text_color(t.muted).child(label))
       .child(div().id(id).h(32).px(8).flex().items_center().rounded(5).border(1).border_color(t.input).bg(t.background)
-        .child(Input.new(state).w_full().text_size(12).text_color(t.foreground)));
+        .child(Input.new(state).w_full().text_size(12).text_color(t.foreground).on_mouse_down("left", (_e, cx) => cx.stop_propagation())));
   }
 
   editor(t) {
@@ -113,11 +151,12 @@ export default class Automations extends View {
       .child(h_flex().gap(6)
         .child(this.button("automation-save", "Save", cx => this.request({ action: "save", revision: this.form.revision,
           id: this.form.id, name: this.name.value(), schedule: this.schedule.value(), command: this.command.value() }, cx)))
-        .child(this.button("automation-cancel", "Cancel", cx => { this.form = null; this.error = null; cx.notify(); })));
+        .child(this.button("automation-cancel", "Cancel", cx => { this.form = null; this.error = null; this.nav.focus(); cx.notify(); })));
   }
 
-  row(job, t) {
-    return v_flex().id(`automation-${job.id}`).flex_none().py(10).gap(7).border_b(1).border_color(t.border)
+  row(job, t, on = false) {
+    return v_flex().id(`automation-${job.id}`).flex_none().px(6).py(10).gap(7).rounded(6).border_b(1).border_color(t.border)
+      .when(on, el => el.bg(t.selected))
       .child(h_flex().items_center().gap(7)
         .child(div().size(6).flex_none().rounded(3).bg(job.enabled ? t.done : t.dim))
         .child(div().id(`automation-name-${job.id}`).flex_1().min_w(0).truncate().tooltip(job.name).font_medium().child(job.name))
@@ -129,7 +168,7 @@ export default class Automations extends View {
         .child(this.button(`automation-edit-${job.id}`, "Edit", cx => this.edit(job, cx)))
         .child(this.button(`automation-delete-${job.id}`, this.confirm === job.id ? "Delete?" : "Delete", cx => {
           if (this.confirm === job.id) this.request({ action: "delete", id: job.id, revision: this.revision }, cx);
-          else { this.confirm = job.id; cx.notify(); cx.timer.after(3000, cx => { this.confirm = null; cx.notify(); }); }
+          else { this.confirm = job.id; cx.notify(); cx.timer.after(3000, cx => { if (this.confirm === job.id) this.confirm = null; cx.notify(); }); }
         })));
   }
 
@@ -137,22 +176,34 @@ export default class Automations extends View {
     const t = theme();
     const enabled = this.jobs.filter(j => j.enabled).length;
     const list = this.jobs.filter(j => this.filter === "all" || j.enabled === (this.filter === "enabled"));
-    return v_flex().size_full().min_w(0).min_h(0).bg(t.chrome).text_color(t.foreground).text_size(12.5)
+    const kbd = this.nav.focused();
+    const items = [];
+    const kids = [];
+    if (this.error) kids.push(div().py(8).text_color(t.blocked).whitespace_normal().child(this.error));
+    if (this.form) kids.push(this.editor(t));
+    if (!this.ready && !this.error) kids.push(div().py(14).text_color(t.dim).child("Loading cron jobs…"));
+    if (this.ready && !this.jobs.length && !this.form) kids.push(v_flex().py(18).gap(6)
+      .child(div().child("No automations yet"))
+      .child(div().text_size(12).text_color(t.dim).whitespace_normal().child("Create a scheduled command with + New (a). Enabled jobs run even when Herdr is closed.")));
+    if (this.ready && this.jobs.length > 0 && !list.length) kids.push(div().py(14).text_color(t.dim).child(`No ${this.filter} automations`));
+    for (const j of list) {
+      items.push({ job: j, section: kids.length });
+      kids.push(this.row(j, t, kbd && this.nav.sel === items.length - 1));
+    }
+    this.items = items;
+    this.nav.clamp(items.length);
+    return v_flex().id("automations-root").size_full().min_w(0).min_h(0).bg(t.chrome).text_color(t.foreground).text_size(12.5)
+      .track_focus(this.nav.handle).on_mouse_down("left", () => this.nav.focus()).on_key_down((e, cx) => this.onKey(e, cx))
       .child(v_flex().flex_none().p(12).gap(9).border_b(1).border_color(t.border)
         .child(h_flex().items_center().gap(5)
-          .child(div().flex_1().font_semibold().text_size(13).child("Automations"))
+          .child(div().flex_1().font_semibold().text_size(13).text_color(kbd ? t.accent : t.foreground).child("Automations"))
           .child(this.button("automations-refresh", "Refresh", cx => this.refresh(cx)))
           .when(this.ready, el => el.child(this.button("automations-new", "+ New", cx => this.edit(null, cx)))))
         .child(div().text_size(11).text_color(t.dim).child(`This Mac · ${enabled} enabled · ${this.jobs.length - enabled} disabled`))
         .child(h_flex().gap(4).children(["all", "enabled", "disabled"].map(f => this.button(`automations-filter-${f}`, f[0].toUpperCase() + f.slice(1), cx => { this.filter = f; cx.notify(); }, this.filter === f)))))
-      .child(v_flex().id("automations-scroll").flex_1().min_h(0).px(12).pb(14).gap(8).overflow_y_scrollbar()
-        .when(Boolean(this.error), el => el.child(div().py(8).text_color(t.blocked).whitespace_normal().child(this.error)))
-        .when(Boolean(this.form), el => el.child(this.editor(t)))
-        .when(!this.ready && !this.error, el => el.child(div().py(14).text_color(t.dim).child("Loading cron jobs…")))
-        .when(this.ready && !this.jobs.length && !this.form, el => el.child(v_flex().py(18).gap(6)
-          .child(div().child("No automations yet"))
-          .child(div().text_size(12).text_color(t.dim).whitespace_normal().child("Create a scheduled command with + New. Enabled jobs run even when Herdr is closed."))))
-        .when(this.ready && this.jobs.length > 0 && !list.length, el => el.child(div().py(14).text_color(t.dim).child(`No ${this.filter} automations`)))
-        .children(list.map(j => this.row(j, t))));
+      .child(v_flex().id("automations-scroll").flex_1().min_h(0).px(12).pb(14).gap(8).overflow_y_scrollbar().track_scroll(this.scroll)
+        .children(kids))
+      .when(kbd, el => el.child(footer({ h_flex, div }, t,
+        [["↵ e", "edit"], ["a", "new"], ["space t", "on or off"], ["dd", "delete"], ["f", "filter"], ["r", "refresh"]], this.nav.help)));
   }
 }

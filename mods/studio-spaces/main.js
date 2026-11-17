@@ -5,7 +5,8 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { agents, spaces, machines, panes, terminals, run, openOverlay, exec, hc, theme, shared, setShared, watchFolder, window, layout, settings } from "herdr";
+import { agents, spaces, machines, panes, terminals, run, openOverlay, exec, hc, theme, shared, setShared, watchFolder, window, layout, settings, nextCommand } from "herdr";
+import { Nav, footer } from "./nav.js";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -81,6 +82,24 @@ export default class Spaces extends View {
     for (const state of Object.values(this.reconnecting)) state.busy = false;
     this.folded = new Set(JSON.parse(localStorage.getItem("machines.folded") ?? "[]"));
     this.open = new Set(JSON.parse(localStorage.getItem("spaces.open") ?? "[]")); // spaces showing their terminals
+    // Keyboard (vim keys, nav.js): j/k over the spaces drawn, in screen order. The terminal is to the right.
+    this.nav = new Nav(cx, { leave: "right" });
+    this.nav.watch(cx);
+    this.drawn = [];
+    cx.spawn(async (cx) => {
+      for (;;) {
+        const c = await nextCommand();
+        if (c === "focus") {
+          // Start on the space you're in.
+          const at = this.drawn.findIndex((w) => w.active);
+          if (at >= 0) this.nav.sel = at;
+          this.nav.focus();
+          cx.notify();
+        }
+      }
+    });
+    // Focus handles report no blur: a cheap check redraws once when the keyboard leaves (or arrives),
+    // so the highlight and the key footer don't linger.
     this.refreshMachines(cx);
     cx.timer.every(15000, cx => this.refreshMachines(cx));
     // Refresh only when the refs could have changed (see `due`).
@@ -89,6 +108,9 @@ export default class Spaces extends View {
 
   checkNew(cx) {
     const now = Date.now();
+    // In the background a new branch can wait: every 5 seconds instead of every second.
+    if (window()?.active === false && now - (this.lastCheck ?? 0) < 5000) return;
+    this.lastCheck = now;
     const sp = spaces();
     for (const s of sp) if (!this.shown.has(s.id)) this.born[s.id] ??= now;
     const due = this.due(now, sp, panes());
@@ -137,8 +159,18 @@ export default class Spaces extends View {
   }
 
   refreshMachines(cx) {
+    // The first read always runs; after that only while the window is in front, and a redraw only on change.
+    if (this.machinesRead && window()?.active === false) return;
+    this.machinesRead = true;
     cx.spawn(async cx => {
-      try { const r = await hc(["machine", "ls", "--json"]); if (r.code === 0) this.machines = (JSON.parse(r.stdout).machines ?? []).filter((m) => !m.temporary); } catch {}
+      try {
+        const r = await hc(["machine", "ls", "--json"]);
+        if (r.code === 0) {
+          const list = (JSON.parse(r.stdout).machines ?? []).filter((m) => !m.temporary);
+          if (JSON.stringify(list) === JSON.stringify(this.machines)) return;
+          this.machines = list;
+        }
+      } catch {}
       cx.notify();
     });
   }
@@ -308,10 +340,34 @@ export default class Spaces extends View {
     return out.filter(r => this.shown.has(r.w.id));
   }
 
+  // Shows or hides a space's terminals under it.
+  toggleOpen(id, cx) {
+    if (this.open.has(id)) this.open.delete(id); else this.open.add(id);
+    try { localStorage.setItem("spaces.open", JSON.stringify([...this.open])); } catch {}
+    cx.notify();
+  }
+
+  onKey(e, cx) {
+    const w = () => this.drawn[this.nav.sel];
+    const used = this.nav.key(e, this.drawn.length, {
+      enter: () => w() && run("space.select", { id: w().id }),
+      l: () => w() && run("space.select", { id: w().id }),
+      o: () => w() && run("space.select", { id: w().id }),
+      za: () => w() && this.toggleOpen(w().id, cx),
+      r: () => w() && run("space.rename", { id: w().id }),
+      n: () => run("space.new"),
+      // No `confirmed`: Herdr asks before closing a space.
+      dd: () => w() && run("space.close", { id: w().id }),
+    }, run);
+    if (!used) return;
+    cx.stop_propagation();
+    cx.notify();
+  }
+
   // The rows, under a header per machine once one isn't this computer.
   grouped(t, collapsed) {
     const rows = this.ordered();
-    const draw = (r) => (collapsed ? this.compact(r, t) : this.row(r, t));
+    const draw = (r) => { this.drawn.push(r.w); return collapsed ? this.compact(r, t) : this.row(r, t); };
     const remote = [...new Set([...rows.map(r => r.w.machine).filter(Boolean), ...this.machines.map(m => m.name), ...Object.keys(this.reconnecting)])].sort();
     const loading = m => {
       const layout = machines().find(k => k.name === m)?.layout;
@@ -398,11 +454,7 @@ export default class Spaces extends View {
     const { w } = r;
     const kids = this.terminalsOf(w);
     const open = this.open.has(w.id) && kids.length > 0;
-    const toggle = (cx) => {
-      if (this.open.has(w.id)) this.open.delete(w.id); else this.open.add(w.id);
-      try { localStorage.setItem("spaces.open", JSON.stringify([...this.open])); } catch {}
-      cx.notify();
-    };
+    const toggle = (cx) => this.toggleOpen(w.id, cx);
     const box = this.rowBox(r, t, { count: kids.length, open, toggle });
     if (!open) return box;
     // Space, then its tabs, then their terminals, each level inside a guide line (as in the Panes panel).
@@ -495,6 +547,8 @@ export default class Spaces extends View {
       .accessibility_label(`${w.name}${tail ? `, ${tail}` : ""}${state ? `, ${state.count} ${state.status === "blocked" ? "need you" : state.status}` : ""}. Switch to space ${i + 1}`)
       .when(on, (el) => el.bg(t.selected))
       .when(!on, (el) => el.hover((s) => s.bg(t.hover)).active((s) => s.bg(t.selected)))
+      // The keyboard's row: an accent ring, so it reads apart from the space you're in.
+      .when(this.kbd && this.drawn[this.nav.sel]?.id === w.id, (el) => el.border_1().border_color(t.accent))
       .when(this.pressed === w.id && this.over !== w.id, (el) => el.opacity(0.5))
       .when(this.pressed !== null && this.over === w.id && this.pressed !== w.id, (el) => el.child(
         div().absolute().left(0).right(0).h(2).bg(t.accent)
@@ -562,8 +616,13 @@ export default class Spaces extends View {
       .justify_center()
       .items_center()
       .when(w.active, (el) => el.bg(t.selected))
-      .when(!w.active, (el) => el.hover((s) => s.bg(t.hover)))
+      .when(!w.active, (el) => el.hover((s) => s.bg(t.hover)).active((s) => s.bg(t.selected)))
+      .when(this.kbd && this.drawn[this.nav.sel]?.id === w.id, (el) => el.border_1().border_color(t.accent))
+      .cursor_pointer()
+      .tooltip([w.name, w.branch, { blocked: "needs you", done: "done", working: "working" }[w.status], i < 9 ? `\u2303${i + 1}` : null].filter(Boolean).join(" · "))
+      .accessibility_label(`${w.name}${w.active ? ", current space" : ""}${w.status === "blocked" ? ", needs you" : ""}`)
       .on_click(() => run("space.select", { id: w.id }))
+      .on_mouse_down("right", () => this.menu(w))
       .child(div().text_color(w.active ? t.foreground : t.muted).child(String(i + 1)))
       .child(div().absolute().right(5).text_color(tone(t, w.status)).child(glyph(w.status))));
   }
@@ -584,7 +643,9 @@ export default class Spaces extends View {
       else if (r === cur.rank) cur.count++;
     }
     const ids = new Set(sp.map(p => p.id));
-    const kept = Object.fromEntries(Object.entries(shared("space.colors") ?? {}).filter(([id]) => ids.has(id)));
+    // While a machine is still loading or offline its spaces are missing: keep their colours until it's back.
+    const settled = machines().every(m => m.layout === "ready");
+    const kept = Object.fromEntries(Object.entries(shared("space.colors") ?? {}).filter(([id]) => !settled || ids.has(id)));
     let changed = Object.keys(kept).length !== Object.keys(shared("space.colors") ?? {}).length;
     for (const p of sp) {
       if (kept[p.id] || p.name === "~") continue;
@@ -594,7 +655,14 @@ export default class Spaces extends View {
     }
     if (changed) setShared("space.colors", kept);
     this.measure = 0;
+    this.kbd = this.nav.focused();
+    // Rows are drawn in screen order; the keyboard's index is checked against the previous draw's list,
+    // then the new list replaces it.
+    const kbdId = this.drawn[this.nav.sel]?.id;
+    this.drawn = [];
     const rows = this.grouped(t, collapsed);
+    if (kbdId) { const at = this.drawn.findIndex((w) => w.id === kbdId); if (at >= 0) this.nav.sel = at; }
+    this.nav.clamp(this.drawn.length);
     // Fit the panel to its rows (the Agents list takes the rest), once per change, until the person
     // drags the edge themselves: then their height wins, is remembered, and has no upper limit.
     const now = find(layout(), "spaces")?.size?.px;
@@ -614,14 +682,17 @@ export default class Spaces extends View {
       this.settled = false;
       run("layout.resize", { id: "spaces", px: want });
     }
-    return v_flex().size_full().min_h(0).bg(t.chrome).text_size(13)
-      .child(h_flex().h(31).pl(16).pr(10).items_center().justify_between().text_size(11.5).text_color(t.dim)
+    return v_flex().id("spaces-root").size_full().min_h(0).bg(t.chrome).text_size(13)
+      .track_focus(this.nav.handle).on_mouse_down("left", () => this.nav.focus()).on_key_down((e, cx) => this.onKey(e, cx))
+      .child(h_flex().h(31).pl(16).pr(10).items_center().justify_between().text_size(11.5).text_color(this.kbd ? t.accent : t.dim)
         .when(collapsed, el => el.pl(0).pr(0).justify_center())
         .when(!collapsed, el => el.child("Spaces"))
         .child(div().id("space-new").size(26).flex_none().flex().items_center().justify_center().rounded(6).hover(s => s.bg(t.hover).text_color(t.foreground))
           .on_click(() => run("space.new")).child(svg("mods/studio-workspace-chrome/plus.svg").size(14))))
       .child(v_flex().flex_1().min_h(0).px(collapsed ? 0 : 8).pb(14).overflow_y_scrollbar().mode("always")
         .on_mouse_up("left", (_e, cx) => { this.pressed = null; cx.notify(); })
-        .children(rows));
+        .children(rows))
+      .when(this.kbd && !collapsed, (el) => el.child(footer({ h_flex, div }, t,
+        [["↵ l", "go"], ["za", "terminals"], ["r", "rename"], ["n", "new"], ["dd", "close"], ["^j", "agents"]], this.nav.help)));
   }
 }

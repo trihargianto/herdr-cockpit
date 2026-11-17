@@ -20,13 +20,15 @@ function toggleSidebar() {
   if (!narrow()) setShared("sidebar.width", width);
   // Mods edited before the rail went by width still read the flag.
   setShared("sidebar.collapsed", !narrow());
-  run("layout.resize", { id: "sidebar", px: narrow() ? (shared("sidebar.width") ?? 268) : window()?.platform === "macos" ? 76 : 44 });
+  run("layout.resize", { id: "sidebar", px: narrow() ? (shared("sidebar.width") ?? 232) : window()?.platform === "macos" ? 76 : 44 });
 }
 
 export default class WorkspaceChrome extends View {
-  button(id, label, action) {
+  button(id, label, action, tip) {
     const t = theme();
-    return div().id(id).size(26).flex_none().flex().items_center().justify_center().rounded(6).text_color(t.muted).hover(s => s.bg(t.hover).text_color(t.foreground))
+    return div().id(id).size(26).flex_none().flex().items_center().justify_center().rounded(6).text_color(t.muted).cursor_pointer()
+      .tooltip(tip).accessibility_label(tip)
+      .hover(s => s.bg(t.hover).text_color(t.foreground)).active(s => s.bg(t.selected))
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click(action).child(label);
   }
   render() {
@@ -35,13 +37,14 @@ export default class WorkspaceChrome extends View {
     if (props()?.footer) {
       const row = (id, icon, label, dim, action) => h_flex().id(id).h(28).px(8).gap(9).items_center().rounded(8)
         .when(collapsed, el => el.relative().w(32).px(0).justify_center().tooltip(label))
-        .text_color(dim ? t.dim : t.muted).hover(s => s.bg(t.hover).text_color(t.foreground)).cursor_pointer()
+        .accessibility_label(label)
+        .text_color(dim ? t.dim : t.muted).hover(s => s.bg(t.hover).text_color(t.foreground)).active(s => s.bg(t.selected)).cursor_pointer()
         .on_click(action).child(svg(`mods/studio-workspace-chrome/${icon}.svg`).size(14))
         .when(!collapsed, el => el.child(label));
       const ready = div().size(6).rounded_full().bg(t.accent);
       return v_flex().size_full().bg(t.chrome).border_t(1).border_color(t.border).px(8).pt(4).pb(8).text_size(13)
         .when(collapsed, el => el.px(0).items_center())
-        .child(row("settings", "settings", "Settings", false, () => run("app.settings"))
+        .child(row("settings", "settings", updates().app.ready ? "Settings · update ready" : "Settings", false, () => run("app.settings"))
           .when(Boolean(updates().app.ready), el => el.child(collapsed ? ready.absolute().top(5).right(6) : ready)))
         .child(row("machine", "plus", "Add machine", true, () => run("mod.open", { name: "machine-add" })));
     }
@@ -49,8 +52,8 @@ export default class WorkspaceChrome extends View {
       .when(window()?.platform === "macos" && !window()?.fullscreen && !collapsed, el => el.pl(76))
       .when(!collapsed, el => el.child(h_flex().flex_1().min_w(0).gap(8).items_center().child(image("frame/welcome/herdr.png").size(20).rounded(5)).child(div().id("brand-space").flex_1().min_w(0).truncate().font_semibold().text_color(t.foreground)
         .tooltip(spaces().find((s) => s.active)?.name ?? "Herdr").child(spaces().find((s) => s.active)?.name ?? "Herdr"))))
-      .when(!collapsed, el => el.child(this.button("search", svg("mods/studio-workspace-chrome/search.svg").size(15), () => run("mod.open", { name: "picker" }))))
+      .when(!collapsed, el => el.child(this.button("search", svg("mods/studio-workspace-chrome/search.svg").size(15), () => run("mod.open", { name: "studio-picker" }), "Quick switcher (Cmd+P)")))
       // On the macOS rail the traffic lights fill the row; the agents list's » unfolds it.
-      .when(!(collapsed && window()?.platform === "macos"), el => el.child(this.button("sidebar-toggle", svg("mods/studio-workspace-chrome/sidebar.svg").size(15), toggleSidebar)));
+      .when(!(collapsed && window()?.platform === "macos"), el => el.child(this.button("sidebar-toggle", svg("mods/studio-workspace-chrome/sidebar.svg").size(15), toggleSidebar, "Fold to a rail (Cmd+B)")));
   }
 }

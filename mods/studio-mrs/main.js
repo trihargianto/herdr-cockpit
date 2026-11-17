@@ -3,8 +3,9 @@
 // plus one POST when you press Retry). Nothing else leaves the machine.
 
 import { View, div, svg } from "gpui-kit";
-import { v_flex, h_flex } from "gpui-base";
-import { exec, home, theme, window, settings, layout } from "herdr";
+import { v_flex, h_flex, ScrollHandle } from "gpui-base";
+import { exec, home, theme, window, settings, layout, props, shared, run, nextCommand } from "herdr";
+import { Nav, footer } from "./nav.js";
 
 const ICONS = "mods/studio-workspace-chrome";
 const MINE = "merge_requests?scope=created_by_me&state=opened&per_page=20";
@@ -41,6 +42,18 @@ async function glab(args) {
   return r.stdout;
 }
 
+// The tab bar's feed (shared "studio.mrs") in the shape the cards read, so the pane shows at once
+// when it opens; its own fetch then fills in the rest.
+function fromFeed(m) {
+  return {
+    id: m.id, iid: m.iid, project_id: m.project, title: m.title, draft: m.draft,
+    references: { full: `${m.repo}!${m.iid}` }, source_branch: m.branch, web_url: m.url,
+    head_pipeline: m.pipeline ? { status: m.pipeline, id: m.pipelineId ?? null } : null,
+    has_conflicts: m.conflicts, user_notes_count: m.notes, author: { username: m.author },
+    updated_at: m.updated ? new Date(m.updated).toISOString() : null, approvedByMe: m.approvedByMe,
+  };
+}
+
 // failed and conflicts first, then running, then the rest, drafts last.
 function rank(m) {
   const p = m.head_pipeline?.status;
@@ -72,7 +85,11 @@ function findNode(node, id) {
 function shown(id) {
   const root = layout();
   const panel = findNode(root, "panel");
-  return Boolean(panel && !panel.hidden && findNode(root, "panel-body")?.active === id);
+  if (!panel || panel.hidden) return false;
+  // A copy in the lower half of the panel (props.slot "lower") is shown when that stack is open on it.
+  const lower = props()?.slot === "lower";
+  const stack = findNode(root, lower ? "panel-lower" : "panel-body");
+  return Boolean(stack && !stack.hidden && stack.active === (lower ? `lower-${id}` : id));
 }
 
 export default class Mrs extends View {
@@ -90,6 +107,17 @@ export default class Mrs extends View {
     this.hideDrafts = false;
     this.last = 0;
     this.redrawn = 0;
+    // Keyboard: the cards in screen order (`rows`, rebuilt on each render; `items` is your MRs).
+    this.nav = new Nav(cx, { slot: props()?.slot ?? null });
+    this.nav.watch(cx);
+    this.scroll = ScrollHandle.new();
+    this.rows = [];
+    cx.spawn(async (cx) => {
+      for (;;) {
+        const c = await nextCommand();
+        if (this.nav.wants(c, props()?.slot)) { this.nav.focus(); cx.notify(); }
+      }
+    });
     // Looks every two minutes, but only while this pane is the one shown (and at once when it opens).
     // A redraw every 30 seconds keeps "5m ago" honest.
     cx.timer.every(3000, (cx) => {
@@ -161,11 +189,15 @@ export default class Mrs extends View {
       try {
         await glab(["api", "-X", "POST", `projects/${m.project_id}/pipelines/${id}/retry`]);
       } catch (e) {
-        this.error = `Retry failed: ${String(e.message ?? e)}`;
+        // Kept apart from this.error, which the refresh below clears.
+        this.note = `Retry failed: ${String(e.message ?? e)}`;
+        cx.timer.after(8000, (cx) => { this.note = null; cx.notify(); });
       }
       this.retrying.delete(id);
       this.loading = false;
       this.refresh(cx);
+      // Home, the badge and the status bar follow the feed.
+      run("studio-tabs.refresh");
     });
   }
 
@@ -234,7 +266,35 @@ export default class Mrs extends View {
       .when(count != null, (el) => el.child(div().text_color(t.dim).child(String(count))));
   }
 
-  card(t, m, now) {
+  onKey(e, cx) {
+    const it = () => this.rows[this.nav.sel]?.m;
+    const used = this.nav.key(e, this.rows.length, {
+      enter: () => { const m = it(); if (m) cx.open_url(m.web_url); },
+      o: () => { const m = it(); if (m) cx.open_url(m.web_url); },
+      yy: () => {
+        const m = it();
+        if (!m) return;
+        cx.write_to_clipboard(m.web_url);
+        this.copied = m.id;
+        cx.timer.after(1200, (cx) => { if (this.copied === m.id) this.copied = null; cx.notify(); });
+      },
+      R: () => {
+        const m = it();
+        const theirs = m?.author?.username && m.author.username !== this.me;
+        if (m && m.head_pipeline?.status === "failed" && !theirs) this.retry(m, cx);
+      },
+      r: () => { this.refresh(cx); run("studio-tabs.refresh"); },
+      f: () => { this.filtering = !this.filtering; },
+      D: () => { this.hideDrafts = !this.hideDrafts; },
+    }, run);
+    if (!used) return;
+    cx.stop_propagation();
+    const sec = this.rows[this.nav.sel]?.section;
+    if (sec != null) this.scroll.scroll_to_item(sec);
+    cx.notify();
+  }
+
+  card(t, m, now, on = false) {
     const status = m.head_pipeline?.status;
     const pipe = this.pipeline(t, status);
     const title = m.title.replace(/^Draft:\s*/i, "");
@@ -244,7 +304,7 @@ export default class Mrs extends View {
     const retrying = this.retrying.has(m.head_pipeline?.id);
     const theirs = m.author?.username && m.author.username !== this.me;
     return v_flex().id(`mr-${m.id}`).w_full().flex_none().px(10).py(8).gap(5).rounded(8).border(1)
-      .border_color(status === "failed" ? t.blocked + "55" : t.border).bg(t.chrome).cursor_pointer()
+      .border_color(on ? t.accent : status === "failed" ? t.blocked + "55" : t.border).bg(on ? t.selected : t.chrome).cursor_pointer()
       .accessibility_label(`${title}, ${ref}${pipe ? `, pipeline ${pipe.label.toLowerCase()}` : ""}. Open in browser`)
       .hover((s) => s.bg(t.hover)).active((s) => s.bg(t.selected))
       .on_click((_e, cx) => cx.open_url(m.web_url))
@@ -271,9 +331,13 @@ export default class Mrs extends View {
     const t = theme();
     const now = Date.now();
     const order = (list) => [...(list ?? [])].sort((a, b) => rank(a) - rank(b) || Date.parse(b.updated_at) - Date.parse(a.updated_at));
-    const allMine = order(this.items);
+    const feed = shared("studio.mrs");
+    this.me ??= feed?.me ?? null;
+    const items = this.items ?? (feed?.mine ? feed.mine.map(fromFeed) : null);
+    const reviewsList = this.reviews ?? (feed?.reviews ? feed.reviews.map(fromFeed) : null);
+    const allMine = order(items);
     // Ones you haven't approved yet come first.
-    const allReviews = order(this.reviews).sort((a, b) => Number(Boolean(a.approvedByMe)) - Number(Boolean(b.approvedByMe)));
+    const allReviews = order(reviewsList).sort((a, b) => Number(Boolean(a.approvedByMe)) - Number(Boolean(b.approvedByMe)));
     const active = FILTERS.find((f) => f.id === this.filter);
     const keep = (m) => (!active || active.test(m)) && !(this.hideDrafts && m.draft);
     const mine = allMine.filter(keep);
@@ -282,12 +346,30 @@ export default class Mrs extends View {
     const narrowed = Boolean(active) || this.hideDrafts;
     const failed = allMine.filter((m) => m.head_pipeline?.status === "failed").length;
     const waiting = allReviews.filter((m) => !m.approvedByMe && !m.draft).length;
-    const loaded = this.items && this.reviews;
+    const loaded = items && reviewsList;
     const section = (label, n, extra) => h_flex().flex_none().h(24).px(2).mt(4).gap(6).items_center().text_size(11).font_medium()
       .child(div().text_color(t.dim).child(label)).child(div().text_color(t.dim).child(String(n))).when(Boolean(extra), (el) => el.child(extra));
-    return v_flex().size_full().min_w(0).min_h(0).bg(t.chrome).text_color(t.foreground).text_size(13)
+    // Keyboard rows: each card and the scroll child it is. The children before the first section
+    // header are the note, error, loading and empty lines that are showing.
+    const kbd = this.nav.focused();
+    const rows = [];
+    let at = [Boolean(this.note), Boolean(this.error), !loaded && !this.error,
+      loaded && !mine.length && !reviews.length && !this.error && !narrowed,
+      loaded && !mine.length && !reviews.length && !this.error && narrowed].filter(Boolean).length;
+    const cardOf = (m) => {
+      rows.push({ m, section: at++ });
+      return this.card(t, m, now, kbd && this.nav.sel === rows.length - 1);
+    };
+    if (reviews.length > 0) at++;
+    const reviewCards = reviews.map(cardOf);
+    if (mine.length > 0) at++;
+    const mineCards = mine.map(cardOf);
+    this.rows = rows;
+    this.nav.clamp(rows.length);
+    return v_flex().id("mrs-root").size_full().min_w(0).min_h(0).bg(t.chrome).text_color(t.foreground).text_size(13)
+      .track_focus(this.nav.handle).on_mouse_down("left", () => this.nav.focus()).on_key_down((e, cx) => this.onKey(e, cx))
       .child(h_flex().flex_none().h(41).px(14).pt(4).items_center().gap(8)
-        .child(div().text_size(11.5).font_medium().text_color(t.dim).child("Merge requests"))
+        .child(div().text_size(13).font_semibold().text_color(kbd ? t.accent : t.foreground).child("Merge requests"))
         .when(failed > 0, (el) => el.child(div().text_size(11.5).font_medium().text_color(t.blocked).child(`${failed} failed`)))
         .when(waiting > 0, (el) => el.child(div().text_size(11.5).font_medium().text_color(t.working).child(`${waiting} to review`)))
         .child(div().flex_1())
@@ -305,7 +387,7 @@ export default class Mrs extends View {
         .child(div().id("mr-refresh").size(24).flex_none().flex().items_center().justify_center().rounded(6).text_color(t.dim)
           .tooltip("Refresh").accessibility_label("Refresh merge requests")
           .when(!this.loading, (el) => el.cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground)).active((s) => s.bg(t.selected))
-            .on_click((_e, cx) => this.refresh(cx)))
+            .on_click((_e, cx) => { this.refresh(cx); run("studio-tabs.refresh"); }))
           .child(this.loading
             ? svg(`${ICONS}/spinner.svg`).size(13).text_color(t.muted).spin(900)
             : svg("mods/studio-mrs/refresh.svg").size(13))))
@@ -315,7 +397,8 @@ export default class Mrs extends View {
           () => { this.filter = this.filter === f.id ? null : f.id; })))
         .child(this.filterChip(t, "f-drafts", "Hide drafts", everything.filter((m) => m.draft).length, this.hideDrafts,
           () => { this.hideDrafts = !this.hideDrafts; }))))
-      .child(v_flex().id("mrs-scroll").flex_1().min_h(0).px(10).pb(10).gap(6).overflow_y_scrollbar()
+      .child(v_flex().id("mrs-scroll").flex_1().min_h(0).px(10).pb(10).gap(6).overflow_y_scrollbar().track_scroll(this.scroll)
+        .when(Boolean(this.note), (el) => el.child(div().px(4).py(4).text_size(12).text_color(t.blocked).child(this.note)))
         .when(Boolean(this.error), (el) => el.child(v_flex().px(4).py(6).gap(4)
           .child(div().text_size(12).text_color(t.blocked).child(this.error))
           .child(div().text_size(11.5).text_color(t.dim).whitespace_normal().child(
@@ -330,8 +413,10 @@ export default class Mrs extends View {
           .child(div().text_color(t.muted).child("No merge requests match"))
           .child(this.button(t, "f-clear", "Clear filters", () => { this.filter = null; this.hideDrafts = false; }).self_start())))
         .when(reviews.length > 0, (el) => el.child(section("To review", reviews.length)))
-        .children(reviews.map((m) => this.card(t, m, now)))
+        .children(reviewCards)
         .when(mine.length > 0, (el) => el.child(section("Yours", mine.length)))
-        .children(mine.map((m) => this.card(t, m, now))));
+        .children(mineCards))
+      .when(kbd, (el) => el.child(footer({ h_flex, div }, t,
+        [["↵ o", "open"], ["yy", "copy link"], ["R", "retry pipeline"], ["r", "refresh"], ["f", "filters"], ["D", "hide drafts"]], this.nav.help)));
   }
 }

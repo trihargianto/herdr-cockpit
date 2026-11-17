@@ -42,13 +42,17 @@ export default class Pane extends View {
     return panes().find((p) => p.pane === props()?.pane);
   }
 
-  button(t, id, icon, command, args) {
+  button(t, id, icon, command, args, tip) {
     return div()
       .id(id)
       .p(3)
       .rounded(4)
       .text_color(t.dim)
+      .cursor_pointer()
+      .tooltip(tip)
+      .accessibility_label(tip)
       .hover((s) => s.bg(t.hover).text_color(t.foreground))
+      .active((s) => s.bg(t.selected))
       .on_click((_e, cx) => {
         cx.stop_propagation();
         run(command, args);
@@ -101,17 +105,18 @@ export default class Pane extends View {
       .on_hover((hovered, cx) => { this.hovered = hovered; cx.notify(); })
       .on_click(() => run("pane.focus", { pane }))
       .when(Boolean(pic), (el) => el.child(pic))
-      .child(div().flex_none().truncate().max_w(260).font_medium().text_color(t.foreground).child(name))
+      .child(div().id(`ph-name-${pane}`).flex_none().truncate().max_w(260).font_medium().text_color(t.foreground).tooltip(name).child(name))
       .when(Boolean(p.terminal), (el) => el.child(this.address(t, p.terminal)))
-      .child(div().flex_1().min_w(0).truncate().text_color(t.dim).child(folder(p.cwd)))
+      .child(div().id(`ph-cwd-${pane}`).flex_1().min_w(0).truncate().text_color(t.dim).tooltip(p.cwd ?? "").child(folder(p.cwd)))
       .when(Boolean(p.branch), (el) => el.child(div().id(`ph-branch-${pane}`).flex_none().max_w(150).truncate().text_size(11).text_color(t.dim).tooltip(p.branch).child(p.branch)))
       .when(st === "working", el => el.child(svg("mods/studio-workspace-chrome/spinner.svg").size(12).flex_none().text_color(t.working).spin(900)))
       .when(st === "blocked", el => el.child(div().flex_none().px(6).h(18).flex().items_center().rounded(5).bg(t.blocked + "26").text_size(10.5).font_semibold().text_color(t.blocked).child("Needs you")))
-      .when(st === "done", el => el.child(div().size(7).flex_none().rounded(4).bg(t.done)))
+      .when(p.zoomed, el => el.child(div().flex_none().px(6).h(18).flex().items_center().rounded(5).bg(t.accent + "26").text_size(10.5).font_medium().text_color(t.accent).child("Zoomed")))
+      .when(st === "done", el => el.child(div().flex_none().px(6).h(18).flex().items_center().rounded(5).bg(t.done + "26").text_size(10.5).font_semibold().text_color(t.done).child("Done")))
       .when(this.hovered, el => el
-        .child(this.button(t, `ph-r-${pane}`, "split-right", "pane.split", { direction: "right", pane }))
-        .child(this.button(t, `ph-d-${pane}`, "split-down", "pane.split", { direction: "down", pane }))
-        .child(this.button(t, `ph-z-${pane}`, p.zoomed ? "unzoom" : "zoom", "pane.zoom", { pane }))
-        .child(this.button(t, `ph-x-${pane}`, "close", "pane.close", { pane })));
+        .child(this.button(t, `ph-r-${pane}`, "split-right", "pane.split", { direction: "right", pane }, "Split right"))
+        .child(this.button(t, `ph-d-${pane}`, "split-down", "pane.split", { direction: "down", pane }, "Split down"))
+        .child(this.button(t, `ph-z-${pane}`, p.zoomed ? "unzoom" : "zoom", "pane.zoom", { pane }, p.zoomed ? "Unzoom" : "Zoom this pane"))
+        .child(this.button(t, `ph-x-${pane}`, "close", "pane.close", { pane }, "Close pane")));
   }
 }

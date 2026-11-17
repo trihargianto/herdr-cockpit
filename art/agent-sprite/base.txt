@@ -1,0 +1,26 @@
+# base
+|........................|
+|.........K..KK..........|
+|........KHKKHHK.K.......|
+|.......KHHHHHHHKHK......|
+|......KHHhHHHhHHHHK.....|
+|.....KHHHHhHHHHHHHK.....|
+|.....KHHHHHHHHHHHHHK....|
+|.....KHHSSSSSSHHHHHK....|
+|.....KHSSKKSSSKKSHHK....|
+|.....KSSSSSSSSSSSSSK....|
+|....KsSSSEWSSSEWSSSK....|
+|....KsSSSEESSSEESSsK....|
+|.....KSPPSSRRSSPPSK.....|
+|......KSSSSRRSSSSK......|
+|.......KKSSSSSKKKKKKKK..|
+|......KWWWKYKWWKLLLLLLK.|
+|.....KWWWWKYKWWKLLLLLLK.|
+|....KWwWWWWYWWWKLLllLLK.|
+|....KWwWWWWYWWWKLLllLLK.|
+|....KWwWWWWyWWWKLLLLLLK.|
+|....KWwWWWWWWSSKLLLLLLK.|
+|.KKKKKKKKKKKKKKKKKKKKKKK|
+|.KDDDDDDDDDDDDDDDDDDDDDK|
+|.KdddddddddddddddddddddK|
+|.KKKKKKKKKKKKKKKKKKKKKKK|

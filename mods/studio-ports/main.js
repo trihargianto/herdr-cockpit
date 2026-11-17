@@ -4,8 +4,9 @@
 // window is in front. The only write is `kill <pid>`, after a second click.
 
 import { View, div, svg } from "gpui-kit";
-import { v_flex, h_flex } from "gpui-base";
-import { exec, spaces, panes, home, theme, window, settings, layout } from "herdr";
+import { v_flex, h_flex, ScrollHandle } from "gpui-base";
+import { exec, spaces, panes, home, theme, window, settings, layout, props, run, nextCommand } from "herdr";
+import { Nav, footer } from "./nav.js";
 
 const ICONS = "mods/studio-workspace-chrome";
 
@@ -62,7 +63,11 @@ function findNode(node, id) {
 function shown(id) {
   const root = layout();
   const panel = findNode(root, "panel");
-  return Boolean(panel && !panel.hidden && findNode(root, "panel-body")?.active === id);
+  if (!panel || panel.hidden) return false;
+  // A copy in the lower half of the panel (props.slot "lower") is shown when that stack is open on it.
+  const lower = props()?.slot === "lower";
+  const stack = findNode(root, lower ? "panel-lower" : "panel-body");
+  return Boolean(stack && !stack.hidden && stack.active === (lower ? `lower-${id}` : id));
 }
 
 export default class Ports extends View {
@@ -75,8 +80,21 @@ export default class Ports extends View {
     this.copied = null;
     this.showHidden = false;
     this.last = 0;
+    // Keyboard: the server cards in screen order (rebuilt on each render), and where each sits.
+    this.nav = new Nav(cx, { slot: props()?.slot ?? null });
+    this.nav.watch(cx);
+    this.scroll = ScrollHandle.new();
+    this.items = [];
+    cx.spawn(async (cx) => {
+      for (;;) {
+        const c = await nextCommand();
+        if (this.nav.wants(c, props()?.slot)) { this.nav.focus(); cx.notify(); }
+      }
+    });
     // Looks every ten seconds, but only while this pane is the one shown (and on the first look after it opens).
     cx.timer.every(2000, (cx) => {
+      // The first look runs even with the window in the background, so the pane never sits on "Looking…".
+      if (shown("ports") && !this.firstLook) { this.firstLook = true; this.refresh(cx); return; }
       if (window()?.active && shown("ports") && Date.now() - this.last > 10000) this.refresh(cx);
     });
   }
@@ -137,12 +155,36 @@ export default class Ports extends View {
     this.confirm = null;
     cx.spawn(async (cx) => {
       try {
-        await exec("kill", [String(proc.pid)], { cwd: home(), timeout: 10000 });
-      } catch {}
+        const r = await exec("kill", [String(proc.pid)], { cwd: home(), timeout: 10000 });
+        if (r.code !== 0) throw new Error((r.stderr || "kill failed").trim().split("\n")[0]);
+        this.killNote = null;
+      } catch (e) {
+        this.killNote = `Couldn't stop ${proc.cmd} (pid ${proc.pid}): ${String(e.message ?? e)}`;
+        cx.timer.after(8000, (cx) => { this.killNote = null; cx.notify(); });
+      }
       this.loading = false;
       // Give it a moment to exit before looking again.
       cx.timer.after(700, (cx) => this.refresh(cx));
     });
+  }
+
+  onKey(e, cx) {
+    const it = () => this.items[this.nav.sel];
+    const used = this.nav.key(e, this.items.length, {
+      enter: () => { const x = it(); if (x) cx.open_url(x.url); },
+      o: () => { const x = it(); if (x) cx.open_url(x.url); },
+      yy: () => { const x = it(); if (x) this.copy(x.url, `${x.proc.pid}-${x.proc.port}`, cx); },
+      // dd is deliberate, so it skips the second-click confirm; only your own servers stop.
+      dd: () => { const x = it(); if (x?.canStop) { this.confirm = x.proc.pid; this.kill(x.proc, cx); } },
+      s: () => { const w = it()?.where; if (w) { run("space.select", { id: w.space }); run("tab.select", { id: w.tab }); } },
+      H: () => { this.showHidden = !this.showHidden; },
+      r: () => this.refresh(cx),
+    }, run);
+    if (!used) return;
+    cx.stop_propagation();
+    const sec = this.items[this.nav.sel]?.section;
+    if (sec != null) this.scroll.scroll_to_item(sec);
+    cx.notify();
   }
 
   copy(text, key, cx) {
@@ -178,17 +220,17 @@ export default class Ports extends View {
     }
     const where = best && ctx.tabs.get(best.tab);
     if (!where) return null;
-    return where.tab.named ? `${where.space.name} / ${where.tab.name}` : where.space.name;
+    return { label: where.tab.named ? `${where.space.name} / ${where.tab.name}` : where.space.name, space: where.space.id, tab: where.tab.id };
   }
 
   // canStop: only your own servers get a stop button. Stopping an agent's helper would end the agent.
-  row(t, proc, ctx, canStop = false) {
+  row(t, proc, ctx, canStop = false, on = false) {
     const url = `http://localhost:${proc.port}`;
     const confirming = this.confirm === proc.pid;
     const folder = proc.cwd.startsWith(`${ctx.home}/`) ? `~${proc.cwd.slice(ctx.home.length)}` : proc.cwd;
     const where = this.place(proc, ctx);
     const mono = settings().font_family ?? "JetBrains Mono";
-    return v_flex().id(`port-${proc.pid}-${proc.port}`).w_full().flex_none().px(12).py(10).gap(6).rounded(10).border(1).border_color(t.border).bg(t.chrome)
+    return v_flex().id(`port-${proc.pid}-${proc.port}`).w_full().flex_none().px(12).py(10).gap(6).rounded(10).border(1).border_color(on ? t.accent : t.border).bg(on ? t.selected : t.chrome)
       .hover((s) => s.bg(t.hover))
       .child(h_flex().gap(8).items_center().h(24)
         .child(div().flex_none().font_family(mono).text_size(15).font_semibold().child(String(proc.port)))
@@ -212,7 +254,11 @@ export default class Ports extends View {
           : this.iconButton(t, `port-kill-${proc.pid}-${proc.port}`, "mods/studio-ports/power.svg", `Stop ${proc.cmd} (pid ${proc.pid})`, (cx) => this.kill(proc, cx)))))
       .child(div().id(`port-cmd-${proc.pid}-${proc.port}`).min_w(0).truncate().text_size(11.5).text_color(t.dim).tooltip(proc.command).child(shorten(proc.command)))
       .child(h_flex().gap(6).items_center().text_size(11).text_color(t.dim)
-        .when(Boolean(where), (el) => el.child(h_flex().h(18).px(7).flex_none().items_center().rounded(9).bg(t.raised).text_color(t.muted).child(where)))
+        .when(Boolean(where), (el) => el.child(h_flex().id(`port-where-${proc.pid}-${proc.port}`).h(18).px(7).flex_none().items_center().rounded(9).bg(t.raised).text_color(t.muted)
+          .cursor_pointer().tooltip(`Go to ${where.label}`).accessibility_label(`Go to ${where.label}`)
+          .hover((s) => s.text_color(t.foreground)).active((s) => s.bg(t.selected))
+          .on_click(() => { run("space.select", { id: where.space }); run("tab.select", { id: where.tab }); })
+          .child(where.label)))
         .when(Boolean(folder) && folder !== "/", (el) => el.child(div().id(`port-dir-${proc.pid}-${proc.port}`).flex_1().min_w(0).truncate().tooltip(proc.cwd).child(folder)))
         .child(div().flex_none().font_family(mono).text_size(10.5).child(`pid ${proc.pid}`)));
   }
@@ -241,33 +287,49 @@ export default class Ports extends View {
     const other = all.filter((p) => !yours.includes(p));
     const tabs = new Map(spaces().flatMap((s) => s.tabs.map((tab) => [tab.id, { space: s, tab }])));
     const ctx = { home: base, panes: panes().filter((p) => p.terminal && p.cwd), tabs };
-    return v_flex().size_full().min_w(0).min_h(0).bg(t.chrome).text_color(t.foreground).text_size(13)
+    const kbd = this.nav.focused();
+    const items = [];
+    const kids = [];
+    // One card per server; `section` is its place among the scroll area's children.
+    const card = (p, canStop) => {
+      const url = `http://localhost:${p.port}`;
+      items.push({ proc: p, url, canStop, where: this.place(p, ctx), section: kids.length });
+      return this.row(t, p, ctx, canStop, kbd && this.nav.sel === items.length - 1);
+    };
+    if (this.killNote) kids.push(div().px(4).py(4).text_size(12).text_color(t.blocked).whitespace_normal().child(this.killNote));
+    if (this.error) kids.push(div().px(4).py(6).text_size(12).text_color(t.blocked).child(this.error));
+    if (!this.list && !this.error) kids.push(div().px(4).py(8).text_color(t.dim).child("Looking…"));
+    if (this.list && !mine.length) kids.push(v_flex().px(4).py(8).gap(4)
+      .child(div().text_color(t.muted).child("No servers running"))
+      .child(div().text_size(12).text_color(t.dim).child("Dev servers you start from a project folder show up here.")));
+    for (const p of mine) kids.push(card(p, true));
+    // Everything that isn't your own server stays out of sight behind one quiet line.
+    if (tools.length + other.length > 0) kids.push(h_flex().id("ports-hidden").h(28).px(2).mt(6).gap(7).items_center().flex_none().rounded(6)
+      .text_size(11.5).text_color(t.dim).cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground)).active((s) => s.bg(t.selected))
+      .accessibility_label(`${this.showHidden ? "Hide" : "Show"} ${tools.length + other.length} agent and system listeners`)
+      .on_click((_e, cx) => {
+        this.showHidden = !this.showHidden;
+        cx.notify();
+      })
+      .child(div().flex_1().child(this.showHidden ? "Hide agent and system listeners" : `${tools.length + other.length} agent and system listeners hidden`))
+      .child(svg(`${ICONS}/chevron-${this.showHidden ? "down" : "right"}.svg`).size(11).flex_none()));
+    if (this.showHidden) for (const p of [...tools, ...other]) kids.push(card(p, false));
+    this.items = items;
+    this.nav.clamp(items.length);
+    return v_flex().id("ports-root").size_full().min_w(0).min_h(0).bg(t.chrome).text_color(t.foreground).text_size(13)
+      .track_focus(this.nav.handle).on_mouse_down("left", () => this.nav.focus()).on_key_down((e, cx) => this.onKey(e, cx))
       .child(h_flex().flex_none().px(14).pt(14).pb(10).items_center().gap(8)
-        .child(div().text_size(13).font_semibold().child("Ports"))
+        .child(div().text_size(13).font_semibold().text_color(kbd ? t.accent : t.foreground).child("Ports"))
         .when(this.list, (el) => el.child(div().text_size(11.5).text_color(t.dim).child(`${mine.length} ${mine.length === 1 ? "server" : "servers"}`)))
         .child(div().flex_1())
         .child(div().id("ports-refresh").size(24).flex_none().flex().items_center().justify_center().rounded(6).text_color(t.dim)
-          .tooltip("Refresh").accessibility_label("Refresh ports")
+          .tooltip("Refresh (r)").accessibility_label("Refresh ports")
           .when(!this.loading, (el) => el.cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground)).active((s) => s.bg(t.selected))
             .on_click((_e, cx) => this.refresh(cx)))
           .child(this.loading ? svg(`${ICONS}/spinner.svg`).size(13).text_color(t.muted).spin(900) : svg("mods/studio-ports/refresh.svg").size(13))))
-      .child(v_flex().id("ports-scroll").flex_1().min_h(0).px(12).pb(14).gap(8).overflow_y_scrollbar()
-        .when(Boolean(this.error), (el) => el.child(div().px(4).py(6).text_size(12).text_color(t.blocked).child(this.error)))
-        .when(!this.list && !this.error, (el) => el.child(div().px(4).py(8).text_color(t.dim).child("Looking…")))
-        .when(Boolean(this.list) && !mine.length, (el) => el.child(v_flex().px(4).py(8).gap(4)
-          .child(div().text_color(t.muted).child("No servers running"))
-          .child(div().text_size(12).text_color(t.dim).child("Dev servers you start from a project folder show up here."))))
-        .children(mine.map((p) => this.row(t, p, ctx, true)))
-        // Everything that isn't your own server stays out of sight behind one quiet line.
-        .when(tools.length + other.length > 0, (el) => el.child(h_flex().id("ports-hidden").h(28).px(2).mt(6).gap(7).items_center().flex_none().rounded(6)
-          .text_size(11.5).text_color(t.dim).cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground)).active((s) => s.bg(t.selected))
-          .accessibility_label(`${this.showHidden ? "Hide" : "Show"} ${tools.length + other.length} agent and system listeners`)
-          .on_click((_e, cx) => {
-            this.showHidden = !this.showHidden;
-            cx.notify();
-          })
-          .child(div().flex_1().child(this.showHidden ? "Hide agent and system listeners" : `${tools.length + other.length} agent and system listeners hidden`))
-          .child(svg(`${ICONS}/chevron-${this.showHidden ? "down" : "right"}.svg`).size(11).flex_none())))
-        .when(this.showHidden, (el) => el.children([...tools, ...other].map((p) => this.row(t, p, ctx)))));
+      .child(v_flex().id("ports-scroll").flex_1().min_h(0).px(12).pb(14).gap(8).overflow_y_scrollbar().track_scroll(this.scroll)
+        .children(kids))
+      .when(kbd, (el) => el.child(footer({ h_flex, div }, t,
+        [["↵ o", "open"], ["yy", "copy URL"], ["dd", "stop"], ["s", "go to space"], ["H", "hidden listeners"], ["r", "refresh"]], this.nav.help)));
   }
 }

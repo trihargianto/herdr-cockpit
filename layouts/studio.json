@@ -145,8 +145,15 @@
                 {
                   "id": "panel-body",
                   "type": "stack",
-                  "active": "tasks",
+                  "active": "home",
                   "children": [
+                    {
+                      "id": "home",
+                      "type": "block",
+                      "content": {
+                        "mod": "studio-home"
+                      }
+                    },
                     {
                       "id": "projects",
                       "type": "block",
@@ -166,13 +173,6 @@
                       "type": "block",
                       "content": {
                         "mod": "studio-inbox"
-                      }
-                    },
-                    {
-                      "id": "send",
-                      "type": "block",
-                      "content": {
-                        "mod": "studio-send"
                       }
                     },
                     {
@@ -217,9 +217,77 @@
                         "mod": "studio-automations"
                       }
                     }
+                  ],
+                  "size": {
+                    "weight": 3
+                  },
+                  "min": 160
+                },
+                {
+                  "id": "panel-lower",
+                  "type": "stack",
+                  "hidden": true,
+                  "active": "lower-inbox",
+                  "size": {
+                    "weight": 2
+                  },
+                  "min": 160,
+                  "children": [
+                    {
+                      "id": "lower-home",
+                      "type": "block",
+                      "content": {
+                        "mod": "studio-home",
+                        "props": {
+                          "slot": "lower"
+                        }
+                      }
+                    },
+                    {
+                      "id": "lower-inbox",
+                      "type": "block",
+                      "content": {
+                        "mod": "studio-inbox",
+                        "props": {
+                          "slot": "lower"
+                        }
+                      }
+                    },
+                    {
+                      "id": "lower-mrs",
+                      "type": "block",
+                      "content": {
+                        "mod": "studio-mrs",
+                        "props": {
+                          "slot": "lower"
+                        }
+                      }
+                    },
+                    {
+                      "id": "lower-ports",
+                      "type": "block",
+                      "content": {
+                        "mod": "studio-ports",
+                        "props": {
+                          "slot": "lower"
+                        }
+                      }
+                    },
+                    {
+                      "id": "lower-usage",
+                      "type": "block",
+                      "content": {
+                        "mod": "studio-usage",
+                        "props": {
+                          "slot": "lower"
+                        }
+                      }
+                    }
                   ]
                 }
-              ]
+              ],
+              "gap": 12,
+              "resizable": true
             }
           ]
         },

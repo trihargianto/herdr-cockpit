@@ -10,8 +10,10 @@ import { run, hc, focused, appHome, theme, settings, closeOverlay, props, nextCo
 
 const go = (direction) => [["pane.go", { direction }]];
 const swap = (direction) => [["pane.swap", { direction }]];
-// Shows a panel; a panel that takes the keyboard (Projects, Panes) gets it too, ready for j/k.
-const panel = (child, mod) => [["layout.select", { stack: "panel-body", child }], ["layout.show", { id: "panel" }], ...(mod ? [[`${mod}.focus`]] : [])];
+// Opens a panel (or keeps it open) and gives it the keyboard, ready for j/k. `q` inside closes it.
+const panel = (child) => [[`studio-tabs.key-${child}`]];
+// Through the tab bar, which is always on screen (a hidden panel can't take commands).
+const tabs = (command) => [[`studio-tabs.${command}`]];
 const nth = (cmd) => Array.from({ length: 9 }, (_, i) => ({ key: String(i + 1), label: `Go to ${i + 1}`, run: [[cmd, { index: i + 1 }]] }));
 
 // The leader tree. A group has `items`; anything else has `run`, a list of [command, args].
@@ -51,24 +53,40 @@ const TREE = [
     { key: "k", label: "Previous agent", run: [["agent.prev"]] },
   ] },
   { key: "p", label: "Panels", items: [
+    { key: "h", label: "Home", run: panel("home") },
     { key: "m", label: "Monitoring", run: panel("usage") },
-    { key: "p", label: "Projects", run: panel("projects", "studio-projects") },
+    { key: "p", label: "Projects", run: panel("projects") },
     { key: "t", label: "Tasks", run: panel("tasks") },
     { key: "i", label: "Inbox", run: panel("inbox") },
     { key: "l", label: "Agent talk", run: panel("talk") },
-    { key: "s", label: "Send", run: panel("send") },
     { key: "g", label: "Merge requests", run: panel("mrs") },
     { key: "o", label: "Ports", run: panel("ports") },
     { key: "c", label: "Automations", run: panel("automations") },
     { key: "r", label: "Review", run: panel("review") },
   ] },
+  { key: "P", label: "Panels below", items: [
+    { key: "P", label: "Toggle the lower half", run: tabs("lower") },
+    { key: "h", label: "Home below", run: tabs("lower-home") },
+    { key: "i", label: "Inbox below", run: tabs("lower-inbox") },
+    { key: "g", label: "Merge requests below", run: tabs("lower-mrs") },
+    { key: "o", label: "Ports below", run: tabs("lower-ports") },
+    { key: "m", label: "Monitoring below", run: tabs("lower-usage") },
+  ] },
+  { key: "g", label: "Go", items: [
+    { key: "n", label: "Agent that needs you", run: tabs("go-blocked") },
+    { key: "d", label: "Last finished agent", run: tabs("go-done") },
+    { key: "m", label: "MR for this branch", run: tabs("open-mr") },
+    { key: "t", label: "New task", run: tabs("new-task") },
+  ] },
+  { key: "q", label: "Quiet mode (MR alerts)", run: tabs("quiet") },
   { key: "f", label: "Find", items: [
     { key: "f", label: "Quick switcher", run: [["mod.open", { name: "studio-picker" }]] },
     { key: "p", label: "Command palette", run: [["app.palette"]] },
   ] },
   // The tab bar's Neovim button does the work, so the two never drift apart.
   { key: "n", label: "New tab with Neovim", run: [["studio-tabs.neovim"]] },
-  { key: "b", label: "Toggle sidebar", run: [["layout.toggle", { id: "sidebar" }]] },
+  { key: "b", label: "Sidebar: rail or full", run: [["studio-tabs.sidebar"]] },
+  { key: "B", label: "Hide or show the sidebar", run: [["studio-tabs.sidebar-hide"]] },
   { key: "e", label: "Toggle right panel", run: [["layout.toggle", { id: "panel" }]] },
   { key: "?", label: "All shortcuts", help: true },
 ];
@@ -93,7 +111,8 @@ const ABOUT = {
   "tab.new": "New tab", "tab.close": "Close tab", "tab.next": "Next tab", "tab.prev": "Previous tab", "tab.select": "Go to tab", "tab.rename": "Rename tab",
   "space.new": "New space", "space.next": "Next space", "space.prev": "Previous space", "space.select": "Go to space", "space.rename": "Rename space", "space.close": "Close space",
   "agent.next": "Next agent", "agent.prev": "Previous agent", "layout.switch": "Switch layout", "layout.toggle": "Toggle", "layout.select": "Show panel", "layout.show": "Show", "layout.hide": "Hide",
-  "mod.open": "Open", "terminal.search": "Find in terminal", "terminal.copy": "Copy", "terminal.paste": "Paste", "terminal.paste_image": "Paste image", "terminal.scroll": "Scroll",
+  "mod.open": "Open", "studio-leader.pass": "Send Ctrl+B to the terminal", "mod.open:studio-picker": "Quick switcher", "mod.open:studio-leader": "Leader keys",
+  "studio-tabs.sidebar": "Sidebar: rail or full", "studio-tabs.key-review": "Review panel", "studio-tabs.key-home": "Home panel", "studio-tabs.key-inbox": "Inbox panel", "studio-tabs.go-blocked": "Go to the agent that needs you", "terminal.select_all": "Select all", "terminal.search": "Find in terminal", "terminal.copy": "Copy", "terminal.paste": "Paste", "terminal.paste_image": "Paste image", "terminal.scroll": "Scroll",
   "window.minimize": "Minimize", "window.maximize": "Maximize",
 };
 function about(action) {
@@ -103,11 +122,22 @@ function about(action) {
     return a ? `${base} · ${a}` : base;
   }
   const text = String(action);
+  if (ABOUT[text]) return ABOUT[text];
   if (text.startsWith("send:")) return "Send keys to the terminal";
   const [cmd, ...rest] = text.split(":");
   const base = ABOUT[cmd] ?? cmd;
   return rest.length ? `${base} · ${rest.join(":")}` : base;
 }
+
+// Keys a panel or sidebar list takes while it has the keyboard (see nav.js in each mod).
+const PANEL_KEYS = [
+  ["j k ↓ ↑", "Move (a count first: 5j)"], ["gg G", "Top, bottom (3G: the third)"], ["⌃D ⌃U", "Half a page"],
+  ["⌃H ⌃J ⌃K ⌃L", "To the pane on that side"], ["h Esc", "Back to the terminal"], ["q", "Close the panel"], ["?", "This panel's keys"],
+  ["↵ o l", "Open"], ["yy", "Copy the link or URL"], ["dd", "Delete, stop or close"], ["r", "Refresh"],
+  ["Home: p c w m", "Peek, copy standup, day or week, quiet"], ["Inbox: i f p O", "Reply, go to agent, peek, other agents"],
+  ["MRs: R f D", "Retry, filter, hide drafts"], ["Tasks: x a e s f D", "Status, add, edit, send, filter, done"],
+  ["Projects: / s a x", "Filter, start, add, remove"], ["Spaces: za r n", "Terminals, rename, new"], ["Agents: p P f s", "Peek, pin, filter, scope"],
+];
 
 const SECTION = { global: "Everywhere", terminal: "In a terminal" };
 const sectionName = (s) => SECTION[s] ?? (s.startsWith("layout:") ? `Layout · ${s.slice(7)}` : s.startsWith("mod:") ? `Panel · ${s.slice(4)}` : s);
@@ -256,9 +286,14 @@ export default class Leader extends View {
     byGroup.delete("Leader");
     add("Leader · Ctrl+B, then", flat);
     for (const [g, rows] of byGroup) add(`Leader · ${g}`, rows);
+    // A global key the Studio layout binds again is shadowed here: list only the one that runs.
+    const studio = this.keys?.["layout:studio"] ?? {};
     for (const [section, map] of Object.entries(this.keys ?? {})) {
-      add(sectionName(section), Object.entries(map).map(([k, a]) => ({ keys: prettyKey(k), label: about(a) })));
+      const rows = Object.entries(map).filter(([k]) => section !== "global" || !(k in studio));
+      add(sectionName(section), rows.map(([k, a]) => ({ keys: prettyKey(k), label: about(a) })));
     }
+    // Inside a panel or the sidebar once it has the keyboard (Ctrl+B p …, Cmd+I, or Ctrl+B h/l from a pane).
+    add("In a panel or the sidebar", PANEL_KEYS.map(([keys, label]) => ({ keys, label })));
     return v_flex().flex_none().gap(10)
       .child(h_flex().h(36).flex_none().px(10).items_center().rounded(9).border_1().border_color(t.accent).bg(t.background)
         .child(Input.new(this.input).flex_1().h_full().text_size(12.8).text_color(t.foreground)))

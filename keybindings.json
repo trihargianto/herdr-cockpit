@@ -1,7 +1,15 @@
 {
   "layout:studio": {
     "cmd-p": "mod.open:studio-picker",
-    "ctrl-b": "mod.open:studio-leader"
+    "ctrl-b": "mod.open:studio-leader",
+    "cmd-b": "studio-tabs.sidebar",
+    "cmd-g": "studio-tabs.key-review",
+    "cmd-shift-h": "studio-tabs.key-home",
+    "cmd-i": "studio-tabs.key-inbox",
+    "cmd-shift-j": "studio-tabs.go-blocked"
+  },
+  "terminal": {
+    "cmd-a": "terminal.select_all"
   },
   "mod:studio-leader": {
     "ctrl-b": "studio-leader.pass"

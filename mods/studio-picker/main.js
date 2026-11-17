@@ -14,6 +14,9 @@ const MARK = { ansi6: "#22a99a", ansi3: "#e3814f", ansi4: "#5b8def", ansi5: "#8b
 // color name ("ansi6") or a picked #rrggbb. A space seen without one gets
 // the theme color fewest spaces use, once; every mod does the same in the
 // same order, so they agree, and adding or renaming spaces moves nothing.
+// Side panels, offered when what you type matches one ("inb", "mrs", "ports"…).
+const PANELS = [["home", "Home"], ["inbox", "Inbox"], ["mrs", "Merge requests MRs"], ["tasks", "Tasks"], ["usage", "Monitoring usage limits"],
+  ["ports", "Ports servers"], ["talk", "Agent talk"], ["projects", "Projects"], ["review", "Review Hunk diff"], ["automations", "Automations cron"]];
 const PROJECT_COLORS = ["ansi6", "ansi3", "ansi4", "ansi5", "ansi2", "ansi1"];
 function spaceColors() {
   const ids = new Set(spaces().map((p) => p.id));
@@ -37,7 +40,7 @@ function spaceColor(t, p) {
 export default class Picker extends View {
   init(_props, cx) {
     this.filter = "";
-    this.input = InputState.new({ placeholder: "Search spaces, tabs, agents, or addresses…" });
+    this.input = InputState.new({ placeholder: "Search spaces, tabs, agents, addresses or panels…" });
     this.input.on("change", (_e, cx) => {
       const value = this.input.value();
       if (value === this.filter) return;
@@ -97,6 +100,7 @@ export default class Picker extends View {
       out.push({ kind: "earlier", count: quiet.length });
       if (this.showEarlier || f) quiet.forEach(add);
     }
+    if (f) for (const [id, words] of PANELS) if (words.toLowerCase().split(" ").some((w) => w.startsWith(f)) || words.toLowerCase().includes(f)) out.push({ kind: "panel", id, name: words.split(" ").slice(0, id === "mrs" ? 2 : id === "talk" ? 2 : 1).join(" ") });
     out.push({ kind: "new" });
     out.push({ kind: "space", machine: null });
     for (const m of this.machines) out.push({ kind: "space", machine: m });
@@ -115,11 +119,12 @@ export default class Picker extends View {
     this.close();
     if (r.kind === "ctx") run("tab.select", { id: r.ctx.id });
     else if (r.kind === "new") run("tab.new");
+    else if (r.kind === "panel") run(`studio-tabs.show-${r.id}`);
     else if (r.kind === "space") run("space.new", { machine: r.machine ?? "" });
   }
 
   glyph(t, st) {
-    if (st === "working") return svg("mods/workspace-chrome/spinner.svg").size(12).flex_none().text_color(t.working).spin(900);
+    if (st === "working") return svg("mods/studio-workspace-chrome/spinner.svg").size(12).flex_none().text_color(t.working).spin(900);
     return div().w(12).flex_none().text_color(t[st] ?? t.dim).child(st === "idle" ? "○" : st ? "●" : "·");
   }
 
@@ -185,10 +190,10 @@ export default class Picker extends View {
           .child(`Other spaces · ${r.count} ${this.showEarlier ? "▴" : "▾"}`);
       }
       const on = r === sel;
-      if (r.kind === "new" || r.kind === "space") {
-        const label = r.kind === "new" ? "new tab" : r.machine ? `new space on ${r.machine}` : "new space";
+      if (r.kind === "new" || r.kind === "space" || r.kind === "panel") {
+        const label = r.kind === "panel" ? `open ${r.name} panel` : r.kind === "new" ? "new tab" : r.machine ? `new space on ${r.machine}` : "new space";
         return h_flex()
-          .id(r.kind === "new" ? "pk-new" : `pk-space-${r.machine ?? "here"}`)
+          .id(r.kind === "panel" ? `pk-panel-${r.id}` : r.kind === "new" ? "pk-new" : `pk-space-${r.machine ?? "here"}`)
           .mx(4)
           .when(r.kind === "new", (el) => el.mt(4))
           .px(10)
@@ -201,7 +206,7 @@ export default class Picker extends View {
           .when(on, (el) => el.bg(t.hover))
           .hover((s) => s.bg(t.hover))
           .on_click(() => this.go(r))
-          .child(div().w(12).child("+"))
+          .child(div().w(12).child(r.kind === "panel" ? "›" : "+"))
           .child(label);
       }
       const here = r.w.active && r.ctx.active;
@@ -241,8 +246,10 @@ export default class Picker extends View {
       .on_key_down((e, cx) => {
         const k = e.key;
         if (k === "escape") return this.close();
-        if (k === "down") this.at = (this.at + 1) % pickable.length;
-        else if (k === "up") this.at = (this.at + pickable.length - 1) % pickable.length;
+        // Vim and Emacs too: Ctrl+J / Ctrl+N down, Ctrl+K / Ctrl+P up.
+        const ctrl = e.modifiers.control && !e.modifiers.shift && !e.modifiers.platform;
+        if (k === "down" || (ctrl && (k === "j" || k === "n"))) this.at = (this.at + 1) % pickable.length;
+        else if (k === "up" || (ctrl && (k === "k" || k === "p"))) this.at = (this.at + pickable.length - 1) % pickable.length;
         else if (k === "d" && e.modifiers.control) {
           if (sel?.kind === "ctx") {
             this.close();
@@ -255,7 +262,7 @@ export default class Picker extends View {
       .child(h_flex().items_center().child(div().flex_1().text_size(15).font_semibold().text_color(t.foreground).child("Quick switcher")).child(div().id("picker-esc").px(6).py(2).rounded(5).text_size(11).text_color(t.dim).cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground)).on_click(() => this.close()).child("Esc")))
       .child(
         h_flex().h(36).flex_none().px(10).gap(8).items_center().rounded(9).border_1().border_color(t.accent).bg(t.background)
-          .child(svg("mods/workspace-chrome/search.svg").size(15).text_color(t.dim))
+          .child(svg("mods/studio-workspace-chrome/search.svg").size(15).text_color(t.dim))
           .child(Input.new(this.input).flex_1().h_full().text_size(12.8).text_color(t.foreground)),
       )
       .child(
@@ -275,6 +282,6 @@ export default class Picker extends View {
           .children(rows.map((r, i) => (visible(i) ? place(row(r), i) : null)).filter(Boolean)),
       )
       .child(h_flex().pt(8).px(6).gap(14).border_t(1).border_color(t.border).text_size(10.5).text_color(t.dim)
-        .child("↑ ↓ Navigate").child("↵ Open").child("Esc Close"));
+        .child("↑ ↓ ^j ^k Navigate").child("↵ Open").child("Esc Close"));
   }
 }

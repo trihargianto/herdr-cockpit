@@ -9,7 +9,8 @@
 
 import { View, div, svg, PathBuilder } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { agents, terminals, hc, exec, home, layout, run, settings, window as win } from "herdr";
+import { agents, terminals, hc, exec, home, layout, run, settings, window as win, props, nextCommand } from "herdr";
+import { Nav, footer } from "./nav.js";
 
 const ASSET = "mods/studio-talk";
 const FLY_MS = 760; // sender to receiver, along the curve
@@ -89,6 +90,16 @@ export default class AgentTalk extends View {
     this.mem = new Map(); // address → KB, the agent and everything it started
     this.pids = new Map(); // address → its shell's pid
     this.measuring = false;
+    // Keyboard: j/k pick a card (in the model's order), enter goes to that agent.
+    this.nav = new Nav(cx, { slot: props()?.slot ?? null });
+    this.nav.watch(cx);
+    this.nodeIds = [];
+    cx.spawn(async (cx) => {
+      for (;;) {
+        const c = await nextCommand();
+        if (this.nav.wants(c, props()?.slot)) { this.nav.focus(); cx.notify(); }
+      }
+    });
     this.restore();
     this.scan(cx);
     this.measure(cx);
@@ -442,13 +453,24 @@ export default class AgentTalk extends View {
     return box().border(2).border_color(c.faint);
   }
 
-  card(c, n, p, NW, hot) {
+  onKey(e, cx) {
+    const go = () => { const id = this.nodeIds[this.nav.sel]; if (id) run("agent.focus", { terminal: id }); };
+    const used = this.nav.key(e, this.nodeIds.length, {
+      enter: go, o: go, l: go,
+      c: () => this.clear(cx),
+    }, run);
+    if (!used) return;
+    cx.stop_propagation();
+    cx.notify();
+  }
+
+  card(c, n, p, NW, hot, on = false) {
     const word = n.gone ? "Ended" : WORD[n.status] ?? (n.agent ? "Agent" : "Terminal");
     const kb = n.gone ? null : this.mem.get(n.addr) ?? null;
     const memText = kb == null ? null : kb >= 1048576 ? `${(kb / 1048576).toFixed(1)} GB` : `${Math.round(kb / 1024)} MB`;
     return div().id(`node-${n.addr}`).absolute().left(p.x - NW / 2).top(p.y - NODE_H / 2).w(NW).h(NODE_H)
       .transition("left", { duration: 300, easing: "ease-in-out" }).transition("top", { duration: 300, easing: "ease-in-out" })
-      .rounded(12).bg(hot ? c.cardLive : c.card).border(hot ? 1.5 : 1).border_color(hot ? c.accent : c.line)
+      .rounded(12).bg(on ? c.cardHover : hot ? c.cardLive : c.card).border(hot || on ? 1.5 : 1).border_color(on || hot ? c.accent : c.line)
       .when(n.gone, (el) => el.opacity(0.5))
       .cursor_pointer().hover((s) => s.bg(c.cardHover).border_color(hot ? c.accent : c.faint))
       .tooltip(`${n.where} · ${n.addr} · ${word}${memText ? ` · ${memText} memory (the agent and everything it started)` : ""}. Click to go there`)
@@ -531,7 +553,7 @@ export default class AgentTalk extends View {
       .children(this.edges(c, m, pos, NW, lanes, curve, W, H))
       .children(this.labels(c, m, lanes))
       .children(rings)
-      .children(m.nodes.map((n) => this.card(c, n, pos[n.addr], NW, hot.has(n.addr))))
+      .children(m.nodes.map((n, i) => this.card(c, n, pos[n.addr], NW, hot.has(n.addr), this.nav.focused() && this.nav.sel === i)))
       .children([...ports.values()].map((q) => div().absolute().left(q.x - 4).top(q.y - 4).w(8).h(8).rounded(4).bg(c.raised).border(1).border_color(c.faint)))
       .children(dots);
   }
@@ -540,17 +562,25 @@ export default class AgentTalk extends View {
   header(c) {
     return h_flex().flex_none().h(44).px(12).gap(10).items_center().bg(c.bg).border_b(1).border_color(c.hover)
       .child(svg("mods/studio-tabs/talk.svg").w(16).h(16).flex_none().text_color(c.dim))
-      .child(div().flex_1().min_w(0).truncate().text_size(14).font_weight(600).text_color(c.text).child("Agent talk"));
+      .child(div().flex_1().min_w(0).truncate().text_size(14).font_weight(600).text_color(this.nav.focused() ? c.accent : c.text).child("Agent talk"));
   }
 
   render() {
     const c = lit() ? LIGHT : DARK;
     const W = this.size ? Math.max(220, this.size.width) : null;
-    const H = this.size ? Math.max(260, this.size.height - 44) : 0; // under the 44px header
+    const kbd = this.nav.focused();
+    // Under the 44px header, and above the key footer while the panel has the keyboard.
+    const H = this.size ? Math.max(260, this.size.height - 44 - (kbd ? (this.nav.help ? 64 : 32) : 0)) : 0;
     const m = this.model();
+    this.nodeIds = m.nodes.map((n) => n.addr);
+    this.nav.clamp(this.nodeIds.length);
     return v_flex().id("talk-root").size_full().bg(c.bg).font_family(SANS).text_color(c.text)
+      .track_focus(this.nav.handle).on_mouse_down("left", () => this.nav.focus()).on_key_down((e, cx) => this.onKey(e, cx))
       .on_size_change((size, cx) => { if (size.width !== this.size?.width || size.height !== this.size?.height) { this.size = size; cx.notify(); } })
       .child(this.header(c))
-      .when(Boolean(W), (el) => el.child(this.canvas(c, m, W, H)));
+      .when(Boolean(W), (el) => el.child(this.canvas(c, m, W, H)))
+      // The footer in the Map's own colours.
+      .when(kbd, (el) => el.child(footer({ h_flex, div }, { border: c.hover, chrome: c.bg, dim: c.faint, muted: c.dim },
+        [["j k", "pick an agent"], ["↵ o", "go to it"], ["c", "clear"]], this.nav.help)));
   }
 }
