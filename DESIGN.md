@@ -1,9 +1,9 @@
-# Studio design guidance
+# Cockpit design guidance
 
 Use Emil Kowalski’s `emil-design-eng` skill for interface polish:
 https://github.com/emilkowalski/skills/blob/main/skills/emil-design-eng/SKILL.md
 
-The installed skill is available at `~/.agents/skills/emil-design-eng/SKILL.md` and has been read. Follow it for Studio interface work, adapting web-specific examples to Herdr’s native GPUI APIs.
+The installed skill is available at `~/.agents/skills/emil-design-eng/SKILL.md` and has been read. Follow it for Cockpit interface work, adapting web-specific examples to Herdr’s native GPUI APIs.
 
 Apply its design intent through native GPUI, using the shipped type declarations as the API authority. CSS, React, and browser animation libraries do not apply to Herdr mods.
 

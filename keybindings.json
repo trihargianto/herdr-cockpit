@@ -1,17 +1,17 @@
 {
-  "layout:studio": {
-    "cmd-p": "mod.open:studio-picker",
-    "ctrl-b": "mod.open:studio-leader",
-    "cmd-b": "studio-tabs.sidebar",
-    "cmd-g": "studio-tabs.key-review",
-    "cmd-shift-h": "studio-tabs.key-home",
-    "cmd-i": "studio-tabs.key-inbox",
-    "cmd-shift-j": "studio-tabs.go-blocked"
+  "layout:cockpit": {
+    "cmd-p": "mod.open:cockpit-picker",
+    "ctrl-b": "mod.open:cockpit-leader",
+    "cmd-b": "cockpit-tabs.sidebar",
+    "cmd-g": "cockpit-tabs.key-review",
+    "cmd-shift-h": "cockpit-tabs.key-home",
+    "cmd-i": "cockpit-tabs.key-inbox",
+    "cmd-shift-j": "cockpit-tabs.go-blocked"
   },
   "terminal": {
     "cmd-a": "terminal.select_all"
   },
-  "mod:studio-leader": {
-    "ctrl-b": "studio-leader.pass"
+  "mod:cockpit-leader": {
+    "ctrl-b": "cockpit-leader.pass"
   }
 }

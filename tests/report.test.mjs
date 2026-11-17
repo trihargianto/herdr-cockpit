@@ -1,7 +1,7 @@
 // The Tasks report's pure parts. Run: node --test tests/
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { lastWorkday, reportRows, reportHtml, startedAt } from "../mods/studio-tasks/report.js";
+import { lastWorkday, reportRows, reportHtml, startedAt } from "../mods/cockpit-tasks/report.js";
 
 const at = (y, m, d, h = 9) => new Date(y, m - 1, d, h).getTime();
 const day = (y, m, d) => new Date(y, m - 1, d).getTime();

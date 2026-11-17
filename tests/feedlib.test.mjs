@@ -1,8 +1,8 @@
-// Pure helpers behind the Studio feed and work items. Run: node --test tests/
+// Pure helpers behind the Cockpit feed and work items. Run: node --test tests/
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { nextRun, cronJobs, nextJob, parseLimits, durationMs, mrEvents, eventText } from "../mods/studio-tabs/feedlib.js";
-import { jiraKeys, taskKey, workOf } from "../mods/studio-home/work.js";
+import { nextRun, cronJobs, nextJob, parseLimits, durationMs, mrEvents, eventText } from "../mods/cockpit-tabs/feedlib.js";
+import { jiraKeys, taskKey, workOf } from "../mods/cockpit-home/work.js";
 import { readFileSync } from "node:fs";
 
 test("jira keys come from titles and branches, upper case only", () => {
@@ -13,8 +13,8 @@ test("jira keys come from titles and branches, upper case only", () => {
 });
 
 test("the two copies of work.js stay equal", () => {
-  assert.equal(readFileSync(new URL("../mods/studio-home/work.js", import.meta.url), "utf8"),
-    readFileSync(new URL("../mods/studio-tasks/work.js", import.meta.url), "utf8"));
+  assert.equal(readFileSync(new URL("../mods/cockpit-home/work.js", import.meta.url), "utf8"),
+    readFileSync(new URL("../mods/cockpit-tasks/work.js", import.meta.url), "utf8"));
 });
 
 test("taskKey prefers the field, then the title, then a Jira link", () => {
@@ -50,8 +50,8 @@ test("nextRun finds the next minute a schedule fires", () => {
   assert.equal(nextRun("61 * * * *", from), null);
 });
 
-test("cron jobs keep Studio names and skip disabled lines", () => {
-  const text = "# herdr-studio-name: Daily backup\n0 9 * * * /x/backup.sh\n# herdr-studio-disabled: 0 8 * * * vim\nPATH=/bin\n@hourly /y/ping\n";
+test("cron jobs keep Cockpit names and skip disabled lines", () => {
+  const text = "# herdr-cockpit-name: Daily backup\n0 9 * * * /x/backup.sh\n# herdr-cockpit-disabled: 0 8 * * * vim\nPATH=/bin\n@hourly /y/ping\n";
   assert.deepEqual(cronJobs(text).map((j) => j.name), ["Daily backup", "ping"]);
   const from = new Date(2026, 10, 16, 8, 30).getTime();
   assert.equal(nextJob(text, from).name, "Daily backup");
@@ -77,12 +77,12 @@ test("MR alerts only on changes, never on the first snapshot", () => {
   assert.deepEqual(passed.map((e) => e.kind), ["passed"]);
 });
 
-import { Nav, keyName } from "../mods/studio-home/nav.js";
+import { Nav, keyName } from "../mods/cockpit-home/nav.js";
 import { readdirSync } from "node:fs";
 
 test("every copy of nav.js is the same", () => {
   const mods = new URL("../mods/", import.meta.url);
-  const home = readFileSync(new URL("studio-home/nav.js", mods), "utf8");
+  const home = readFileSync(new URL("cockpit-home/nav.js", mods), "utf8");
   for (const m of readdirSync(mods)) {
     try { assert.equal(readFileSync(new URL(`${m}/nav.js`, mods), "utf8"), home, m); } catch (e) { if (e.code !== "ENOENT" && e.code !== "ENOTDIR") throw e; }
   }
@@ -109,6 +109,6 @@ test("nav moves like vim: counts, gg, G, half pages, pairs", () => {
   press("l", { control: true }); press("h");
   assert.deepEqual(runs, [["pane.go", "right"], ["pane.go", "left"]]);
   assert.equal(press("w"), false);
-  press("q"); assert.deepEqual(runs.at(-1), ["studio-tabs.close-panel", undefined]);
+  press("q"); assert.deepEqual(runs.at(-1), ["cockpit-tabs.close-panel", undefined]);
   assert.equal(keyName(ev("p", { platform: true })), null);
 });

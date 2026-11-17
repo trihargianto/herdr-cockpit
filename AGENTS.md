@@ -1,4 +1,4 @@
-# Herdr Studio instructions
+# Herdr Cockpit instructions
 
 For every Herdr layout or mod change in this project, use the `emil-design-eng` skill at `~/.agents/skills/emil-design-eng/SKILL.md`. This is the user's standing preference.
 

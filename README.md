@@ -1,16 +1,16 @@
-# Herdr Studio
+# Herdr Cockpit
 
 You run five coding agents at once. One is stuck on a question, one finished ten minutes ago, and a
 pipeline just failed. Which one do you look at first?
 
-Herdr Studio is a layout for the [Herdr](https://herdr.dev) desktop app that answers that. It turns
+Herdr Cockpit is a layout for the [Herdr](https://herdr.dev) desktop app that answers that. It turns
 Herdr into a cockpit for agent work: a sidebar with your spaces and agents, a Home panel that says what
 needs you now, alerts for merge requests and pipelines, and side panes for tasks, messages, MRs, ports,
 usage and diff review.
 
-![The Studio layout](layouts/studio.svg)
+![The Cockpit layout](layouts/cockpit.svg)
 
-It's one layout (`layouts/studio.json`) and a set of mods (`mods/studio-*`), written for Herdr's native
+It's one layout (`layouts/cockpit.json`) and a set of mods (`mods/cockpit-*`), written for Herdr's native
 UI toolkit. A small script, `dev.py`, checks them and copies them into Herdr's config folder.
 
 **It started as one person's setup**, built on macOS around GitLab and Jira. Everything else is optional:
@@ -19,13 +19,13 @@ a pane whose tool is missing says so and the rest keeps working.
 ## Quick start
 
 ```sh
-git clone git@github.com:trihargianto/herdr-studio.git
-cd herdr-studio
+git clone git@github.com:trihargianto/herdr-cockpit.git
+cd herdr-cockpit
 cp config.example.json config.json   # then set your Jira site, or leave it
 python3 dev.py
 ```
 
-Herdr switches to the Studio layout. Leave `dev.py` running if you want to edit the mods; stop it
+Herdr switches to the Cockpit layout. Leave `dev.py` running if you want to edit the mods; stop it
 with `Ctrl-C` and the layout stays. Check [Requirements](#requirements) first if anything fails.
 
 ## What you get
@@ -158,8 +158,8 @@ Here's what you need before `dev.py` will run:
 ### 1. Get the code
 
 ```sh
-git clone git@github.com:trihargianto/herdr-studio.git
-cd herdr-studio
+git clone git@github.com:trihargianto/herdr-cockpit.git
+cd herdr-cockpit
 ```
 
 ### 2. Add your settings
@@ -189,7 +189,7 @@ python3 dev.py
 1. runs `herdr-app check` on every mod that changed, and refuses to publish one that fails;
 2. copies `layouts/`, `mods/` and your `config.json` into `~/.config/herdr-app/`;
 3. merges `keybindings.json` into Herdr's `keys.json` (only the keys listed there);
-4. switches Herdr to the `studio` layout;
+4. switches Herdr to the `cockpit` layout;
 5. keeps watching the folder and republishes whenever you save a file.
 
 Press `Ctrl-C` to stop watching: the layout stays installed. To publish once and exit, run
@@ -208,17 +208,17 @@ Press `Ctrl-C` to stop watching: the layout stays installed. To publish once and
 
 Most of it works as soon as it is installed. These are the places to adjust things.
 
-**Layout.** `layouts/studio.json`: sidebar width (`sidebar`, 232 px), tab bar and title bar height
+**Layout.** `layouts/cockpit.json`: sidebar width (`sidebar`, 232 px), tab bar and title bar height
 (44 px), pane gaps and corner radius, and the side panel's width (`panel`, 320 px). The side panes
 are the children of the `panel-body` stack. The lower half is the `panel-lower` stack, hidden until
 you open a pane there; its blocks are second copies of five read-only panes (Home, Inbox, MRs, Ports, Monitoring), with
 `"props": { "slot": "lower" }`. Tasks is left out: two copies would save over each other.
 
 **Jira.** Set `jiraUrl` in `config.json` (see [Install](#2-add-your-settings)); `dev.py` publishes it to
-`~/.config/herdr-app/studio/config.json`, where Home and Tasks read it when they start. Keys are upper
+`~/.config/herdr-app/cockpit/config.json`, where Home and Tasks read it when they start. Keys are upper
 case (`ABC-123`), found in a task's title, a Jira link, or a branch name.
 
-**Shortcuts.** `keybindings.json` holds the Studio keys; edit it and `dev.py` merges the change into
+**Shortcuts.** `keybindings.json` holds the Cockpit keys; edit it and `dev.py` merges the change into
 Herdr's `keys.json`.
 
 **Colours and fonts.** These come from your Herdr theme (Settings in Herdr, or `settings.json`). The
@@ -231,15 +231,15 @@ real bindings.
 
 | What | Where |
 | --- | --- |
-| Tasks | `~/.config/herdr-app/studio-tasks/tasks.json` |
-| Archived tasks | `~/.config/herdr-app/studio-tasks/tasks-archive.json` |
-| Briefs sent to agents | `~/.config/herdr-app/studio-tasks/briefs/` |
+| Tasks | `~/.config/herdr-app/cockpit-tasks/tasks.json` |
+| Archived tasks | `~/.config/herdr-app/cockpit-tasks/tasks-archive.json` |
+| Briefs sent to agents | `~/.config/herdr-app/cockpit-tasks/briefs/` |
 | Small per-pane settings (Space or All, folded sections, where Hunk opens) | each pane's own local storage, inside Herdr |
 
 **Polling.** Every redraw repaints the whole Herdr window, so the mods poll gently. Side panes refresh
 only while they are the pane shown, and mostly only while the Herdr window is in front. The tab bar
-runs the rest, in `mods/studio-tabs/feed.js`, and shares what it finds with the other mods
-(`studio.mrs`, `studio.limits`, `studio.next`, `studio.errors`):
+runs the rest, in `mods/cockpit-tabs/feed.js`, and shares what it finds with the other mods
+(`cockpit.mrs`, `cockpit.limits`, `cockpit.next`, `cockpit.errors`):
 
 | What | How often |
 | --- | --- |
@@ -263,20 +263,20 @@ terminal list and a space's stored folder only record where something started, s
 
 | Path | What it is |
 | --- | --- |
-| `layouts/studio.json` | Window structure, sizes, pane frames, the side panel's two stacks |
-| `layouts/studio.svg` | The preview Herdr's settings screen shows |
-| `mods/studio-tabs` | Tab bar, panel buttons, counters, Neovim button, and the feed (`feed.js`, `feedlib.js`) |
-| `mods/studio-home` | Home pane; `work.js` joins a task to its Jira card, branch, agent and MR |
-| `mods/studio-spaces`, `studio-dashboard` | Sidebar: spaces list and agents panel |
-| `mods/studio-pane` | Pane headers |
-| `mods/studio-workspace-chrome`, `studio-workspace-status` | Sidebar top row and footer; status bar |
-| `mods/studio-leader`, `studio-picker`, `studio-panel-menu` | `Ctrl+B` leader, `Cmd+P` switcher, the Panels menu |
-| `mods/studio-inbox`, `studio-tasks`, `studio-mrs`, `studio-projects`, `studio-usage`, `studio-ports`, `studio-review`, `studio-talk`, `studio-automations` | The other side panes |
+| `layouts/cockpit.json` | Window structure, sizes, pane frames, the side panel's two stacks |
+| `layouts/cockpit.svg` | The preview Herdr's settings screen shows |
+| `mods/cockpit-tabs` | Tab bar, panel buttons, counters, Neovim button, and the feed (`feed.js`, `feedlib.js`) |
+| `mods/cockpit-home` | Home pane; `work.js` joins a task to its Jira card, branch, agent and MR |
+| `mods/cockpit-spaces`, `cockpit-dashboard` | Sidebar: spaces list and agents panel |
+| `mods/cockpit-pane` | Pane headers |
+| `mods/cockpit-workspace-chrome`, `cockpit-workspace-status` | Sidebar top row and footer; status bar |
+| `mods/cockpit-leader`, `cockpit-picker`, `cockpit-panel-menu` | `Ctrl+B` leader, `Cmd+P` switcher, the Panels menu |
+| `mods/cockpit-inbox`, `cockpit-tasks`, `cockpit-mrs`, `cockpit-projects`, `cockpit-usage`, `cockpit-ports`, `cockpit-review`, `cockpit-talk`, `cockpit-automations` | The other side panes |
 | `mods/agenttrail` | The Agenttrail Map. Not used by the layout; Agent talk borrows its look. |
 | `tests/` | Unit tests for the feed, work items, the task report and Automations |
 | `dev.py` | Checks and publishes to Herdr, watches for edits, and uninstalls |
 | `config.example.json` | The settings template; copy it to `config.json` |
-| `keybindings.json` | Studio's shortcuts, merged into Herdr's `keys.json` |
+| `keybindings.json` | Cockpit's shortcuts, merged into Herdr's `keys.json` |
 | `AGENTS.md`, `DESIGN.md` | Notes for coding agents and the design rules used here |
 
 Herdr writes `gpui-kit.d.ts` and `jsconfig.json` into every mod folder so editors can complete the
@@ -325,21 +325,21 @@ Return to Herdr's own layout at any time:
 herdr-app do layout.switch '{"name":"main"}'
 ```
 
-To remove Studio completely, stop `dev.py`, then run:
+To remove Cockpit completely, stop `dev.py`, then run:
 
 ```sh
 python3 dev.py --uninstall
 ```
 
-It switches Herdr back to its own layout, deletes what it published (the `studio` layout, the
-`studio-*` mods, your published `config.json`) and takes its shortcuts out of `keys.json`. A file you
-changed inside Herdr since is kept, and listed. Your tasks stay in `~/.config/herdr-app/studio-tasks/`
+It switches Herdr back to its own layout, deletes what it published (the `cockpit` layout, the
+`cockpit-*` mods, your published `config.json`) and takes its shortcuts out of `keys.json`. A file you
+changed inside Herdr since is kept, and listed. Your tasks stay in `~/.config/herdr-app/cockpit-tasks/`
 unless you delete that folder too.
 
 ## Back up
 
 The whole layout is this repository, plus your `config.json`. Your tasks live outside it, in
-`~/.config/herdr-app/studio-tasks/`, so copy that folder separately if you want them kept.
+`~/.config/herdr-app/cockpit-tasks/`, so copy that folder separately if you want them kept.
 
 **Takeaway:** clone, copy `config.json`, run `python3 dev.py`. Add `glab` and `terminal-notifier` when
 you want MRs and alerts.

@@ -2,7 +2,7 @@
 
 Edit base.txt (the pixel map) or the POSES below, then run:
     python3 art/agent-sprite/build.py
-It writes mods/studio-dashboard/sprites/<status>[-<frame>].png at 2x (48px), so a
+It writes mods/cockpit-dashboard/sprites/<status>[-<frame>].png at 2x (48px), so a
 24pt slot on a Retina screen shows one image pixel per screen pixel: no blur.
 Busy states (working, blocked) get two frames, <status>-0.png and -1.png, that the
 mod flips natively; calm ones are one still PNG.
@@ -11,7 +11,7 @@ from pathlib import Path
 import subprocess, tempfile
 
 HERE = Path(__file__).resolve().parent
-OUT = HERE.parent.parent / 'mods/studio-dashboard/sprites'
+OUT = HERE.parent.parent / 'mods/cockpit-dashboard/sprites'
 SCALE = 2
 KEY = '#ff00ff'  # transparent
 

@@ -10,7 +10,7 @@ import time
 ROOT = Path(__file__).resolve().parent
 HOME = Path.home() / '.config/herdr-app'
 STATE = ROOT / '.published.json'
-CONFIG = 'studio/config.json'  # where config.json goes, under HOME
+CONFIG = 'cockpit/config.json'  # where config.json goes, under HOME
 
 def digest(data):
     return hashlib.sha256(data).hexdigest()
@@ -59,16 +59,46 @@ def publish(files):
         if not target.exists() or target.read_bytes() != data:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(data)
-    for name in previous.keys() - files.keys():
-        if name == 'keybindings.json':
-            continue
-        (HOME / name).unlink(missing_ok=True)
     if 'keybindings.json' in files:
         keys_text = json.dumps(keys, indent=2) + '\n'
         if not keys_target.exists() or keys_target.read_text() != keys_text:
             keys_target.write_text(keys_text)
+    # Files no longer in the source stay recorded until prune() removes them.
+    STATE.write_text(json.dumps({**previous, **{n: digest(d) for n, d in files.items()}}, indent=2) + '\n')
+    print('Published Cockpit.', flush=True)
+
+def remove_empty(folders):
+    """Remove folders left empty; Herdr's generated .d.ts and jsconfig.json don't count."""
+    for folder in sorted(set(folders), key=lambda f: len(f.parts), reverse=True):
+        if not folder.is_dir() or folder in (HOME, HOME / 'mods', HOME / 'layouts'):
+            continue
+        if all(f.name.endswith('.d.ts') or f.name == 'jsconfig.json' for f in folder.iterdir()):
+            shutil.rmtree(folder)
+
+def prune(files):
+    """Delete published files that are gone from the source (a removed or renamed mod)."""
+    previous = json.loads(STATE.read_text()) if STATE.exists() else {}
+    stale = [n for n in previous.keys() - files.keys() if n != 'keybindings.json']
+    for name in stale:
+        (HOME / name).unlink(missing_ok=True)
+    remove_empty((HOME / n).parent for n in stale)
     STATE.write_text(json.dumps({n: digest(d) for n, d in files.items()}, indent=2) + '\n')
-    print('Published Studio.', flush=True)
+
+def migrate_from_studio():
+    """One-time move from the old name, Herdr Studio. Copies (not moves) your data, so the old
+    folders stay as a backup, and drops the old layout's key bindings. Safe to run again."""
+    for old, new in (('studio-tasks', 'cockpit-tasks'), ('studio-automations', 'cockpit-automations')):
+        if (HOME / old).is_dir() and not (HOME / new).exists():
+            shutil.copytree(HOME / old, HOME / new)
+            print(f'Copied ~/.config/herdr-app/{old}/ to {new}/', flush=True)
+    keys_target = HOME / 'keys.json'
+    if keys_target.exists():
+        keys = json.loads(keys_target.read_text())
+        old = [section for section in ('layout:studio', 'mod:studio-leader') if section in keys]
+        for section in old:
+            del keys[section]
+        if old:
+            keys_target.write_text(json.dumps(keys, indent=2) + '\n')
 
 def uninstall():
     """Switch Herdr back to its own layout and remove what dev.py published. Your tasks stay."""
@@ -99,15 +129,9 @@ def uninstall():
             if section in keys and not keys[section]:
                 del keys[section]
         keys_target.write_text(json.dumps(keys, indent=2) + '\n')
-    # Folders left empty (mods/studio-*, studio/); Herdr's generated .d.ts files don't count.
-    for folder in sorted({(HOME / n).parent for n in previous}, key=lambda f: len(f.parts), reverse=True):
-        if not folder.is_dir() or folder in (HOME, HOME / 'mods', HOME / 'layouts'):
-            continue
-        leftovers = [f for f in folder.iterdir() if not (f.name.endswith('.d.ts') or f.name == 'jsconfig.json')]
-        if not leftovers:
-            shutil.rmtree(folder)
+    remove_empty((HOME / n).parent for n in previous)
     STATE.unlink()
-    print('Removed Herdr Studio. Your tasks are still in ~/.config/herdr-app/studio-tasks/.', flush=True)
+    print('Removed Herdr Cockpit. Your tasks are still in ~/.config/herdr-app/cockpit-tasks/.', flush=True)
     for path in kept:
         print(f'Kept (changed inside Herdr since publishing): {path}', flush=True)
 
@@ -120,9 +144,12 @@ if not shutil.which('herdr-app'):
 if args.uninstall:
     uninstall()
     raise SystemExit(0)
+migrate_from_studio()
 files = sources()
 publish(files)
-subprocess.run(['herdr-app', 'do', 'layout.switch', '{"name":"studio"}'], check=True, timeout=15)
+# Switch first, then remove stale files, so the layout on screen never loses its files.
+subprocess.run(['herdr-app', 'do', 'layout.switch', '{"name":"cockpit"}'], check=True, timeout=15)
+prune(files)
 if not args.once:
     print('Watching workspace edits. Ctrl-C stops syncing; Herdr keeps the layout.', flush=True)
     try:
@@ -134,6 +161,7 @@ if not args.once:
                     continue
                 files = updated
                 publish(files)
+                prune(files)
             except (RuntimeError, subprocess.SubprocessError) as error:
                 print(f'Not published: {error}. Fix and save again.', flush=True)
     except KeyboardInterrupt:

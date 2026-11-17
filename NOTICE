@@ -1,18 +1,18 @@
-Herdr Studio
+Herdr Cockpit
 Copyright (c) 2026 Tri Hargianto. Licensed under the MIT License (see LICENSE).
 
 This repository includes files derived from mods and a layout shipped with
 Herdr 0.1.14 (https://herdr.dev), which are licensed under the Apache License,
 Version 2.0 (see LICENSES/Apache-2.0.txt). They were copied with Herdr's
-mod.clone and then modified for Herdr Studio:
+mod.clone and then modified for Herdr Cockpit:
 
-  layouts/studio.json             from the "main" layout
-  mods/studio-spaces/             from the "spaces" mod
-  mods/studio-tabs/               from the "tabs" mod
-  mods/studio-pane/               from the "pane" mod
-  mods/studio-workspace-chrome/   from the "workspace-chrome" mod
-  mods/studio-workspace-status/   from the "workspace-status" mod
+  layouts/cockpit.json             from the "main" layout
+  mods/cockpit-spaces/             from the "spaces" mod
+  mods/cockpit-tabs/               from the "tabs" mod
+  mods/cockpit-pane/               from the "pane" mod
+  mods/cockpit-workspace-chrome/   from the "workspace-chrome" mod
+  mods/cockpit-workspace-status/   from the "workspace-status" mod
 
 Each of these carries a "cloned_from" entry naming its original. The Herdr-derived
 parts of these files remain under the Apache License 2.0; changes made for
-Herdr Studio are also offered under the MIT License.
+Herdr Cockpit are also offered under the MIT License.
