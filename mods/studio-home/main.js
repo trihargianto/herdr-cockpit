@@ -91,6 +91,11 @@ export default class Home extends View {
         if (this.nav.wants(c, props()?.slot)) { this.nav.focus(); cx.notify(); }
       }
     });
+    // Your settings: config.json in the herdr-studio folder, which dev.py publishes here.
+    this.config = {};
+    cx.spawn(async (cx) => {
+      try { this.config = JSON.parse((await readTextFile(`${appHome()}/studio/config.json`)) || "{}"); cx.notify(); } catch {}
+    });
     this.readTasks(cx);
     // Every 2 seconds: notices Home opening (merged MRs load then, not on the next slow tick) and keeps
     // tasks fresh while it's shown. Merged MRs refresh every 10 minutes; times redraw every 30 seconds.
@@ -346,10 +351,10 @@ export default class Home extends View {
 
     // A task you're doing, with its Jira key, space, agent and MR in a strip under the title.
     const taskRow = (x) => {
-      const w = workOf(x, ctx);
+      const w = workOf(x, { ...ctx, jira: this.config.jiraUrl ?? null });
       const on = reg({ open: () => openPanel("tasks"), url: w?.url, agent: w?.agent?.address, section: kids.length });
       const strip = w && h_flex().gap(4).items_center().flex_wrap()
-        .child(this.chip(t, `home-jira-${x.id}`, w.key, t.ansi4, (cx) => cx.open_url(w.url), `Open ${w.key} in Jira`))
+        .child(this.chip(t, `home-jira-${x.id}`, w.key, t.ansi4, (cx) => { if (w.url) cx.open_url(w.url); }, w.url ? `Open ${w.key} in Jira` : `${w.key} (set jiraUrl in config.json to link it)`))
         .when(Boolean(w.space), (el) => el.child(this.chip(t, `home-space-${x.id}`, w.space.name, t.muted,
           () => { run("space.select", { id: w.space.id }); if (w.tab) run("tab.select", { id: w.tab }); }, `Go to ${w.space.name}${w.branch ? ` on ${w.branch}` : ""}`)))
         .when(Boolean(w.agent), (el) => el.child(this.chip(t, `home-agentchip-${x.id}`, w.agent.status === "blocked" ? "Agent needs you" : `Agent ${w.agent.status}`,

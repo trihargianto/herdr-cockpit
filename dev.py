@@ -10,6 +10,7 @@ import time
 ROOT = Path(__file__).resolve().parent
 HOME = Path.home() / '.config/herdr-app'
 STATE = ROOT / '.published.json'
+CONFIG = 'studio/config.json'  # where config.json goes, under HOME
 
 def digest(data):
     return hashlib.sha256(data).hexdigest()
@@ -21,6 +22,14 @@ def sources():
             and p.name != 'jsconfig.json' and not p.name.endswith('.d.ts')}
     if (ROOT / 'keybindings.json').exists():
         files['keybindings.json'] = (ROOT / 'keybindings.json').read_bytes()
+    # Your own settings (copied from config.example.json); the mods read them from Herdr's folder.
+    if (ROOT / 'config.json').exists():
+        data = (ROOT / 'config.json').read_bytes()
+        try:
+            json.loads(data)
+        except ValueError as error:
+            raise RuntimeError(f'config.json is not valid JSON: {error}')
+        files[CONFIG] = data
     return files
 
 def publish(files):
@@ -61,9 +70,56 @@ def publish(files):
     STATE.write_text(json.dumps({n: digest(d) for n, d in files.items()}, indent=2) + '\n')
     print('Published Studio.', flush=True)
 
+def uninstall():
+    """Switch Herdr back to its own layout and remove what dev.py published. Your tasks stay."""
+    previous = json.loads(STATE.read_text()) if STATE.exists() else {}
+    if not previous:
+        print('Nothing to remove: .published.json is missing or empty.', flush=True)
+        return
+    subprocess.run(['herdr-app', 'do', 'layout.switch', '{"name":"main"}'], timeout=15)
+    kept = []
+    for name, sha in previous.items():
+        if name == 'keybindings.json':
+            continue
+        target = HOME / name
+        if not target.exists():
+            continue
+        if digest(target.read_bytes()) != sha:
+            kept.append(str(target))  # changed inside Herdr since: not ours to delete
+            continue
+        target.unlink()
+    # The key bindings dev.py merged into keys.json, where they still have this repository's value.
+    keys_target = HOME / 'keys.json'
+    if (ROOT / 'keybindings.json').exists() and keys_target.exists():
+        keys = json.loads(keys_target.read_text())
+        for section, bindings in json.loads((ROOT / 'keybindings.json').read_text()).items():
+            for key, action in bindings.items():
+                if keys.get(section, {}).get(key) == action:
+                    del keys[section][key]
+            if section in keys and not keys[section]:
+                del keys[section]
+        keys_target.write_text(json.dumps(keys, indent=2) + '\n')
+    # Folders left empty (mods/studio-*, studio/); Herdr's generated .d.ts files don't count.
+    for folder in sorted({(HOME / n).parent for n in previous}, key=lambda f: len(f.parts), reverse=True):
+        if not folder.is_dir() or folder in (HOME, HOME / 'mods', HOME / 'layouts'):
+            continue
+        leftovers = [f for f in folder.iterdir() if not (f.name.endswith('.d.ts') or f.name == 'jsconfig.json')]
+        if not leftovers:
+            shutil.rmtree(folder)
+    STATE.unlink()
+    print('Removed Herdr Studio. Your tasks are still in ~/.config/herdr-app/studio-tasks/.', flush=True)
+    for path in kept:
+        print(f'Kept (changed inside Herdr since publishing): {path}', flush=True)
+
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--once', action='store_true', help='Publish and activate, then exit')
+parser.add_argument('--uninstall', action='store_true', help="Switch back to Herdr's layout and remove what was published")
 args = parser.parse_args()
+if not shutil.which('herdr-app'):
+    raise SystemExit("herdr-app isn't on your PATH. Install Herdr, open it once, then check with `herdr-app status`.")
+if args.uninstall:
+    uninstall()
+    raise SystemExit(0)
 files = sources()
 publish(files)
 subprocess.run(['herdr-app', 'do', 'layout.switch', '{"name":"studio"}'], check=True, timeout=15)
@@ -72,12 +128,13 @@ if not args.once:
     try:
         while True:
             time.sleep(1)
-            updated = sources()
-            if updated != files:
+            try:
+                updated = sources()
+                if updated == files:
+                    continue
                 files = updated
-                try:
-                    publish(files)
-                except (RuntimeError, subprocess.SubprocessError) as error:
-                    print(f'Not published: {error}. Fix and save again.', flush=True)
+                publish(files)
+            except (RuntimeError, subprocess.SubprocessError) as error:
+                print(f'Not published: {error}. Fix and save again.', flush=True)
     except KeyboardInterrupt:
         pass

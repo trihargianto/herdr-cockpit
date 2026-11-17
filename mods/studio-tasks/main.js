@@ -124,6 +124,11 @@ function shown(id) {
 export default class Tasks extends View {
   init(_props, cx) {
     this.dir = `${appHome()}/studio-tasks`;
+    // Your settings: config.json in the herdr-studio folder, which dev.py publishes here.
+    this.config = {};
+    cx.spawn(async (cx) => {
+      try { this.config = JSON.parse(await fs.readFile(`${appHome()}/studio/config.json`, "utf8")); cx.notify(); } catch {}
+    });
     this.tasks = [];
     this.ready = false;
     this.open = null; // the expanded task's id
@@ -261,7 +266,7 @@ export default class Tasks extends View {
     const out = `${this.dir}/report.html`;
     this.queue = this.queue.then(async () => {
       if (!(await fs.exists(out))) return;
-      await fs.writeFile(out, reportHtml([...this.tasks, ...(await this.archived())]));
+      await fs.writeFile(out, reportHtml([...this.tasks, ...(await this.archived())], Date.now(), this.config.jiraUrl ?? null));
     }).catch(() => {});
   }
 
@@ -463,7 +468,7 @@ export default class Tasks extends View {
       try {
         await this.queue;
         const out = `${this.dir}/report.html`;
-        await fs.writeFile(out, reportHtml([...this.tasks, ...(await this.archived())]));
+        await fs.writeFile(out, reportHtml([...this.tasks, ...(await this.archived())], Date.now(), this.config.jiraUrl ?? null));
         const r = await exec("open", [out]);
         if (r.code !== 0) throw new Error((r.stderr || "Couldn't open the report.").trim().split("\n")[0]);
       } catch (e) {
@@ -807,7 +812,7 @@ export default class Tasks extends View {
     const sending = this.sending === task.id;
     const confirming = this.confirm === task.id;
     // The work item: Jira key, the space on that branch, its agent and MR (see work.js).
-    const work = done ? null : workOf(task, { panes: panes(), spaces: spaces(), agents: list, mrs: shared("studio.mrs") });
+    const work = done ? null : workOf(task, { panes: panes(), spaces: spaces(), agents: list, mrs: shared("studio.mrs"), jira: this.config.jiraUrl ?? null });
     const chip = (id, text, color, tip, onClick) => div().id(id).flex_none().h(18).px(6).flex().items_center().rounded(9).bg(color + "1f")
       .text_size(10.5).font_medium().text_color(color).cursor_pointer().tooltip(tip).accessibility_label(tip)
       .hover((s) => s.bg(color + "33")).active((s) => s.bg(color + "40"))
@@ -857,7 +862,7 @@ export default class Tasks extends View {
               .when(today || (open && !done), (el) => el.child(this.toggle(t, `task-today-${task.id}`, "sun.svg", "Today", today, t.accent,
                 today ? `Planned for today${open ? ". Click to unmark (t)" : ""}` : "Plan for today (t)", open ? (cx) => { this.toggleToday(task.id); cx.notify(); } : null)))
               .when(Boolean(work), (el) => el
-                .child(chip(`task-jira-${task.id}`, work.key, t.ansi4, `Open ${work.key} in Jira`, (cx) => cx.open_url(work.url)))
+                .child(chip(`task-jira-${task.id}`, work.key, t.ansi4, work.url ? `Open ${work.key} in Jira` : `${work.key} (set jiraUrl in config.json to link it)`, (cx) => { if (work.url) cx.open_url(work.url); }))
                 .when(Boolean(work.space), (el) => el.child(chip(`task-space-${task.id}`, work.space.name, t.muted, `Go to ${work.space.name}${work.branch ? ` on ${work.branch}` : ""}`,
                   () => { run("space.select", { id: work.space.id }); if (work.tab) run("tab.select", { id: work.tab }); })))
                 .when(Boolean(work.mr), (el) => el.child(chip(`task-mr-${task.id}`, `!${work.mr.iid}${work.mr.pipeline ? ` ${work.mr.pipeline}` : ""}`,

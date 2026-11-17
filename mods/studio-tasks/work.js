@@ -3,7 +3,6 @@
 // ("feature/CFE-1886-upgrade-node"). Pure: the caller passes Herdr's live lists in.
 // The same file lives in studio-home and studio-tasks (mods can't import each other); keep them equal.
 
-export const JIRA = "https://mamikos.atlassian.net/browse/";
 
 // Upper case only ("CFE-1880"): lower case would read "upgrade-node-22" as NODE-22.
 export function jiraKeys(text) {
@@ -31,7 +30,8 @@ const RANK = { blocked: 0, done: 1, working: 2, idle: 3 };
 
 // { key, url, branch, space: {id, name} | null, tab, agent: {address, status} | null, mr | null }, or null
 // without a key. `mrs` is shared("studio.mrs").
-export function workOf(task, { panes = [], spaces = [], agents = [], mrs = null } = {}) {
+// jira: your Jira site ("https://your-team.atlassian.net", from config.json), or null for no links.
+export function workOf(task, { panes = [], spaces = [], agents = [], mrs = null, jira = null } = {}) {
   const key = taskKey(task);
   if (!key) return null;
   const onBranch = panes.filter((p) => p.branch && jiraKeys(p.branch).includes(key));
@@ -41,7 +41,7 @@ export function workOf(task, { panes = [], spaces = [], agents = [], mrs = null 
   const all = [...(mrs?.mine ?? []), ...(mrs?.reviews ?? [])];
   const mr = all.find((m) => jiraKeys(m.branch).includes(key) || jiraKeys(m.title).includes(key)) ?? null;
   return {
-    key, url: `${JIRA}${key}`,
+    key, url: jira ? `${jira.replace(/\/+$/, "")}/browse/${key}` : null,
     branch: onBranch[0]?.branch ?? mr?.branch ?? null,
     space: space ? { id: space.id, name: space.name } : null,
     tab: onBranch.find((p) => p.focused)?.tab ?? onBranch[0]?.tab ?? null,

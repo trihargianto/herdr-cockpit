@@ -50,12 +50,13 @@ export function startedAt(row) {
 // `</script>` in a title must not end the data block.
 const embed = (value) => JSON.stringify(value).replace(/</g, "\\u003c");
 
-export function reportHtml(tasks, now = Date.now()) {
+// jira: your Jira site (config.json), or null: keys then show without a link.
+export function reportHtml(tasks, now = Date.now(), jira = null) {
   const rows = reportRows(tasks).map((r) => ({ ...r, started: startedAt(r) }));
   // A function replacement: "$&" in a title must stay literal.
   // The code first: a title can't then be mistaken for its placeholder.
   return PAGE.replace("/*__LIB__*/", () => lastWorkday.toString())
-    .replace("__DATA__", () => embed({ rows, generated: now }));
+    .replace("__DATA__", () => embed({ rows, generated: now, jira: jira ? jira.replace(/\/+$/, "") + "/browse/" : null }));
 }
 
 const PAGE = String.raw`<!doctype html>
@@ -282,9 +283,10 @@ dialog[open]::backdrop { animation: fade 180ms ease-out; }
 <script id="data" type="application/json">__DATA__</script>
 <script>
 (() => {
-  const { rows, generated } = JSON.parse(document.getElementById("data").textContent);
+  const { rows, generated, jira: JIRA } = JSON.parse(document.getElementById("data").textContent);
   const DAY = 86400000;
-  const JIRA = "https://mamikos.atlassian.net/browse/";
+  // A Jira key: a link when config.json names your Jira site, plain text otherwise.
+  const keyLink = (key, cls) => JIRA ? '<a class="' + cls + '" target="_blank" rel="noopener" href="' + JIRA + esc(key) + '">' + esc(key) + "</a>" : '<span class="' + cls + '">' + esc(key) + "</span>";
   /*__LIB__*/
   const state = { view: "dash", range: "30", project: "all", who: "all", q: "", sort: "done", desc: true };
   try { Object.assign(state, JSON.parse(localStorage.getItem("tasks-report") || "{}"), { q: "" }); } catch {}
@@ -487,7 +489,7 @@ dialog[open]::backdrop { animation: fade 180ms ease-out; }
     s += list.map((r) => {
       const [label, color] = shownStatus(r);
       return '<div class="tr task" tabindex="0" role="button" data-id="' + esc(r.id) + '" aria-label="' + esc("Show details: " + r.title) + '"><span class="c-title" title="' + esc(r.title) + '">' + esc(r.title) + '</span>' +
-        '<span class="c-key">' + (r.key ? '<a class="key" target="_blank" rel="noopener" href="' + JIRA + esc(r.key) + '">' + esc(r.key) + "</a>" : "") + "</span>" +
+        '<span class="c-key">' + (r.key ? keyLink(r.key, "key") : "") + "</span>" +
         '<span class="c-status"><span class="badge"><i class="dot" style="background:' + color + '"></i>' + label + "</span></span>" +
         '<span class="c-date">' + fmtDate(r.created) + '</span><span class="c-date">' + fmtDate(r.doneAt) + "</span>" +
         '<span class="c-dur">' + (r.doneAt && r.created ? dur(r.doneAt - r.created) : "–") + '</span><span class="c-agent">' + esc(r.agent ?? "") + "</span></div>";
@@ -519,7 +521,7 @@ dialog[open]::backdrop { animation: fade 180ms ease-out; }
     const d = standupData();
     $("su-date").textContent = "Standup · " + new Date(d.now).toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "short" });
     $("su-since").textContent = "Since " + new Date(d.since).toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "short" }) + ", the last working day";
-    const key = (r) => r.key ? '<a class="key" target="_blank" rel="noopener" href="' + JIRA + esc(r.key) + '">' + esc(r.key) + "</a>" : "";
+    const key = (r) => r.key ? keyLink(r.key, "key") : "";
     const lastNote = (r, list) => { const n = list[list.length - 1]; return n ? '<div class="note">' + esc(n.text) + "</div>" : ""; };
     const item = (r, meta, body) => '<button class="su-item" data-id="' + esc(r.id) + '"><span class="t">' + esc(r.title) + '</span><span class="m">' + [key(r), meta].filter(Boolean).join(" · ") + "</span>" + body + "</button>";
     const time = (t) => new Date(t).toLocaleString(undefined, { weekday: "short", hour: "2-digit", minute: "2-digit" });
@@ -657,7 +659,7 @@ dialog[open]::backdrop { animation: fade 180ms ease-out; }
     if (r.archived) facts.push(["Archived", when(r.archived)]);
     let s = '<div class="dlg"><div class="dlg-head"><h3 id="detail-title">' + esc(r.title) + '</h3><button class="dlg-close" aria-label="Close" data-close>×</button></div><div class="dlg-body">';
     s += '<div class="meta"><span class="chip"><i class="dot" style="background:' + color + '"></i>' + label + "</span>";
-    if (r.key) s += '<a class="chip key" target="_blank" rel="noopener" href="' + JIRA + esc(r.key) + '">' + esc(r.key) + "</a>";
+    if (r.key) s += keyLink(r.key, "chip key");
     if (r.agent) s += '<span class="chip">Agent ' + esc(r.agent) + "</span>";
     if (isToday(r)) s += '<span class="chip">Planned for today</span>';
     if (r.deleted) s += '<span class="chip">Deleted ' + esc(when(r.deleted)) + "</span>";

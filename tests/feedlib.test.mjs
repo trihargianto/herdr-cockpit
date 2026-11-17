@@ -30,9 +30,11 @@ test("workOf joins branch, space, agent and MR by key", () => {
     spaces: [{ id: "sp1", name: "mamikos-web", tabs: [{ id: "tb1" }] }],
     agents: [{ address: "t1", tab: "tb1", status: "working" }, { address: "t2", tab: "tb1", status: "blocked" }],
     mrs: { mine: [{ iid: 7, branch: "feature/CFE-1886-upgrade-node", pipeline: "failed" }], reviews: [] },
+    jira: "https://example.atlassian.net/",
   });
   assert.equal(w.key, "CFE-1886");
-  assert.equal(w.url, "https://mamikos.atlassian.net/browse/CFE-1886");
+  assert.equal(w.url, "https://example.atlassian.net/browse/CFE-1886");
+  assert.equal(workOf({ title: "CFE-1886 upgrade" }).url, null);
   assert.deepEqual(w.space, { id: "sp1", name: "mamikos-web" });
   assert.equal(w.agent.address, "t2");
   assert.equal(w.mr.iid, 7);
