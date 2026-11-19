@@ -7,11 +7,12 @@ import { agents, terminals, panes, spaces, run, theme, setAgentOrder, layout, se
 import { Nav, footer } from "./nav.js";
 
 const ICONS = "mods/cockpit-workspace-chrome";
+// An agent card's height: py(6) around a 22px title row, a 3px gap and the 18px address row.
+const CARD_H = 6 + 22 + 3 + 18 + 6;
 const ORDER = ["blocked", "done", "working", "idle"];
 const LABELS = { blocked: "Needs you", done: "Done", working: "Working", idle: "Idle" };
 const RANK = { blocked: 4, done: 3, working: 2, idle: 1 };
 // Animated characters: one full two-frame cycle, in ms. Typing is brisk; the "!" blinks slower.
-const FLIPS = { working: 700, blocked: 1100 };
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -72,6 +73,7 @@ export default class Dashboard extends View {
     // looking at a finished agent is not the agent doing anything.
     this.changed = load("changed", {});
     this.hovered = null;
+    this.widths = new Map(); // agent address -> its working card's width, for the edge light
     // Keyboard (vim keys, nav.js): j/k over the agents as listed. The terminal is to the right.
     this.nav = new Nav(cx, { leave: "right" });
     this.nav.watch(cx);
@@ -146,19 +148,46 @@ export default class Dashboard extends View {
     return box.child(div().size(7).rounded(4).border(1.5).border_color(t.idle ?? t.dim));
   }
 
-  // The row's character (art/agent-sprite). Drawn at 2x, so 24pt on a Retina screen is one
-  // image pixel per screen pixel. Busy states flip two frames natively: the second frame sits
-  // on the first and loops its opacity far past 0..1 (-10..11), which clamps into a switch
-  // shorter than one animation frame. (A GIF only advances when the view redraws: it froze here.)
-  sprite(a, quiet) {
-    const base = "mods/cockpit-dashboard/sprites";
-    const flip = FLIPS[a.status];
-    if (!flip) return image(`${base}/${a.status === "done" ? "done" : "idle"}.png`).w(24).h(25).flex_none()
-      .when(quiet, (el) => el.opacity(0.55));
-    const frame = (i) => image(`${base}/${a.status}-${i}.png`).absolute().top(0).left(0).w(24).h(25);
-    return div().relative().w(24).h(25).flex_none()
-      .child(frame(0))
-      .child(frame(1).loop("opacity", { from: -10, to: 11, period: flip, easing: "linear" }));
+  // The agent's own icon in a tile, with its status as a dot on the corner: amber working, red
+  // needs you, green done, none when idle. A working agent's icon bobs, and its card's edge lights;
+  // an idle one sleeps (zZZ).
+  avatar(t, a, quiet) {
+    const dot = { working: t.working, blocked: t.blocked, done: t.done }[a.status];
+    return div().relative().size(28).flex_none().flex().items_center().justify_center().rounded(7)
+      .bg(t.surface).border(1).border_color(t.border)
+      // Working: the glyph bobs gently in its tile (native loop on `top`, no render runs for it).
+      .child(div().relative().when(quiet, (el) => el.opacity(0.55))
+        .when(a.status === "working", (el) => el.loop("top", { from: 1.5, to: -1.5, period: 900, easing: "ease-in-out" }))
+        .child(icon(a.program, 17, quiet ? t.muted : t.foreground)))
+      .when(Boolean(dot), (el) => el.child(div().absolute().bottom(-3).right(-3).size(11).rounded(6)
+        .border(2).border_color(t.chrome).bg(dot)))
+      // Idle: z's drift up off the tile's corner, a letter at a time (native `frames`, no render).
+      .when(a.status === "idle", (el) => el.child(div().absolute().top(-11).left(15).text_size(8.5).font_bold()
+        .text_color(t.dim).frames(["z", "zZ", "zZZ", "zZZ", ""], 650)));
+  }
+
+  // A working agent's card: a light travels around its edge. beam.svg is a fan of light, bright at
+  // its leading edge and fading behind it, turned natively (spin): no render runs for it.
+  // A spinning svg is drawn on top of everything, so the card can't cover it; but it is clipped to
+  // its parent. So four thin strips along the edges each clip their own copy, centred on the card:
+  // they start in the same frame and turn as one. The strips stop short of the rounded corners,
+  // which GPUI would clip square. The card's width comes from on_size_change (the light waits one
+  // frame for it).
+  beam(t, a, card) {
+    const H = CARD_H + 4, W = this.widths.get(a.address), R = 8, E = 2;
+    const light = (top, left) => div().absolute().top(top).left(left).w(W).h(H).flex().items_center().justify_center()
+      .child(svg("mods/cockpit-dashboard/beam.svg").size(720).flex_none().text_color(t.working).spin(3200));
+    const strip = (el, top, left) => el.absolute().overflow_hidden().child(light(top, left));
+    return div().id(`agent-glow-${a.address}`).relative().w_full().flex_none().h(H).my(2).rounded(R).bg(t.working + "40")
+      .on_size_change((size, cx) => {
+        if (this.widths.get(a.address) !== size.width) { this.widths.set(a.address, size.width); cx.notify(); }
+      })
+      .child(div().absolute().top(E).left(E).right(E).bottom(E).rounded(R - E).bg(t.chrome).child(card))
+      .when(Boolean(W), (el) => el
+        .child(strip(div().top(0).left(R).right(R).h(E), 0, -R))
+        .child(strip(div().bottom(0).left(R).right(R).h(E), -(H - E), -R))
+        .child(strip(div().left(0).top(R).bottom(R).w(E), -R, 0))
+        .child(strip(div().right(0).top(R).bottom(R).w(E), -R, -(W - E))));
   }
 
   iconButton(t, id, path, label, action) {
@@ -263,23 +292,23 @@ export default class Dashboard extends View {
         cx.notify();
       })
       .on_click(() => run("pane.focus", { pane: a.pane }))
-      .child(this.sprite(a, quiet))
+      .child(this.avatar(t, a, quiet))
       .child(v_flex().flex_1().min_w(0).gap(3)
       .child(h_flex().h(22).gap(8).items_center()
-        .child(icon(a.program, 16, quiet ? t.muted : t.foreground))
         .child(div().id(`title-${a.address}`).flex_1().min_w(0).truncate().tooltip(name)
           .text_color(quiet ? t.muted : t.foreground).when(a.status === "blocked", (el) => el.font_medium()).child(name))
         .when(hovered, (el) => el.child(actions))
         .when(!hovered && Boolean(at), (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).tooltip(state).child(ago(ctx.now - at)))))
-      .child(h_flex().pl(24).gap(5).items_center().text_size(11.5).text_color(t.dim)
+      .child(h_flex().gap(5).items_center().text_size(11.5).text_color(t.dim)
         .child(this.address(t, a.address))
         .when(Boolean(where), (el) => el.child(div().id(`where-${a.address}`).min_w(0).truncate().tooltip(where).child(where)))
         .when(Boolean(branch), (el) => el
           .child(svg(`${ICONS}/git-branch.svg`).size(11).flex_none().ml(3))
           .child(div().id(`branch-${a.address}`).flex_1().min_w(0).truncate().tooltip(branch).child(branch)))));
 
-    if (!kids.length) return [card];
-    return [card, ...kids.map((k, i) => this.kidRow(t, k, i === kids.length - 1, ctx))];
+    const shown = a.status === "working" ? this.beam(t, a, card) : card;
+    if (!kids.length) return [shown];
+    return [shown, ...kids.map((k, i) => this.kidRow(t, k, i === kids.length - 1, ctx))];
   }
 
   kidRow(t, k, last, ctx) {

@@ -45,7 +45,7 @@ const cpuColor = (_t) => CPU_COLOR, memColor = (_t) => MEM_COLOR;
 const MONO = () => settings().font_family ?? "JetBrains Mono";
 
 const CTX_ROW = 40, CTX_GAP = 2, CTX_PAD = 4, CTX_SHOWN = 3; // three context rows fit the scroll view
-const CARD = 86, CARD2 = 122, GAP = 8; // a card's fixed height; two of them fill a section's scroll view
+const CARD = 86, CARD2 = 138, GAP = 8; // a card's fixed height; two of them fill a section's scroll view
 
 const mem = (kb) => (kb >= 1048576 ? `${(kb / 1048576).toFixed(1)} GB` : kb >= 1024 ? `${Math.round(kb / 1024)} MB` : `${kb} KB`);
 const cpu = (v) => `${v >= 100 ? Math.round(v) : v.toFixed(1)}%`;
@@ -150,7 +150,10 @@ export default class Usage extends View {
     this.machine = load("monitor-machine", null); // the tab shown: null is this computer
     this.pids = new Map(); // terminal address -> its shell's pid
     this.folded = load("monitor-folded", {}); // section title -> true when folded
-    this.heights = load("monitor-heights", {});
+    // Section title -> how many rows of cards it shows, as dragged. Rows, not pixels: a list always
+    // ends on a whole card, even after the cards change size. `heights` holds a drag in progress.
+    this.rows = load("monitor-rows", {});
+    this.heights = {};
     this.limits = {}; // section title -> how many cards it draws (busiest first; "Show more" adds MORE) // section title -> the height the person dragged it to
     this.drag = null; // { title, y, h } while a list's bottom edge is held
     this.sys = {}; // machine key -> { os, cores, ramKb }, read once per machine
@@ -480,7 +483,8 @@ export default class Usage extends View {
         .when(pair.length === 1, (r) => r.child(div().flex_1().min_w(0)));
     });
     const n = rows.length;
-    const height = this.heights[title] ?? (n > 2 ? cardH * 2 + GAP : n * cardH + Math.max(0, n - 1) * GAP);
+    const fit = (k) => k * cardH + Math.max(0, k - 1) * GAP;
+    const height = this.heights[title] ?? fit(Math.min(n, this.rows[title] ?? 2));
     return v_flex().flex_none().gap(4)
       .child(this.foldHeader(t, title, items.length))
       .when(!folded, (el) => el.child(v_flex().id(`mon-list-${title}`).gap(GAP).min_h(0)
@@ -622,8 +626,15 @@ export default class Usage extends View {
         })
         .on_mouse_up("left", (_e, cx) => {
           if (!this.drag) return;
+          // Snap to whole rows of cards.
+          const { title } = this.drag;
+          const step = (title === "Spaces" ? CARD2 : CARD) + GAP;
+          // A press with no move leaves the rows as they were.
+          if (this.heights[title] != null) this.rows = { ...this.rows, [title]: Math.max(1, Math.round((this.heights[title] + GAP) / step)) };
+          const { [title]: _done, ...rest } = this.heights;
+          this.heights = rest;
           this.drag = null;
-          save("monitor-heights", this.heights);
+          save("monitor-rows", this.rows);
           cx.notify();
         })
         .child(monitor)
