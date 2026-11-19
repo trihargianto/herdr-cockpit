@@ -27,6 +27,39 @@ class AutomationsTest(unittest.TestCase):
         self.assertFalse(cron.entries(disabled)[-1]['enabled'])
         self.assertEqual(self.update(disabled, 'delete', id=job['id']), original)
 
+    def test_meta_block_and_wrapped_command(self):
+        original = 'MAILTO=""\n'
+        command = "echo 'it''s' \\% done | tr a b"
+        added = self.update(original, 'save', id=None, name='Report', description='Weekly numbers',
+                            schedule='0 9 * * 1', command=command)
+        job = cron.entries(added)[-1]
+        self.assertEqual(job['command'], command)
+        self.assertEqual(job['description'], 'Weekly numbers')
+        self.assertRegex(job['key'], r'^[0-9a-f]{12}$')
+        self.assertIn(str(cron.RUNNER), added.splitlines()[-1])
+        # The name still sits right above the command, where the tab bar's feed looks for it.
+        self.assertTrue(added.splitlines()[-2].startswith(cron.NAME))
+        toggled = self.update(added, 'toggle', id=job['id'])
+        self.assertEqual(cron.entries(toggled)[-1]['description'], 'Weekly numbers')
+        edited = self.update(toggled, 'save', id=job['id'], name='Report', description='',
+                             schedule='@daily', command='true')
+        again = cron.entries(edited)[-1]
+        self.assertEqual((again['key'], again['description'], again['command'], again['enabled']),
+                         (job['key'], '', 'true', True))
+        self.assertEqual(self.update(edited, 'delete', id=again['id']), original)
+
+    def test_old_named_job_gains_a_key_on_save(self):
+        text = '# herdr-cockpit-name: "Old"\n0 1 * * * /usr/bin/true\n'
+        job = cron.entries(text)[0]
+        self.assertEqual((job['name'], job['key'], job['description']), ('Old', None, ''))
+        saved = self.update(text, 'save', id=job['id'], name='Old', schedule='0 1 * * *', command='/usr/bin/true')
+        self.assertEqual(len(saved.splitlines()), 3)
+        self.assertIsNotNone(cron.entries(saved)[0]['key'])
+
+    def test_description_must_be_single_line(self):
+        with self.assertRaises(ValueError):
+            cron.validate('@daily', 'true', 'Job', 'a\nb')
+
     def test_existing_job_toggle_restores_it(self):
         text = '# keep\n*/5 * * * * echo hello\n'
         disabled = self.update(text, 'toggle', id='1')

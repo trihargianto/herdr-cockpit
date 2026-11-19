@@ -1,7 +1,7 @@
-// Agent talk: who messages whom, drawn in the Agenttrail Map's look (its tokens, type, cards and
-// connectors).
+// Agent talk: who messages whom, as a small map.
 // Agents that talked are cards joined by curved connectors, an arrowhead at the receiver; a new
-// message flies along its connector as a dot, and the line runs dashed in amber for a few seconds.
+// message flies along its connector as a dot, and the line runs dashed in the "working" colour for a
+// few seconds. The chrome (header, buttons, cards, empty state) follows the theme like Merge requests.
 // Herdr has no "message sent" event, so this reads what the agents already show (`hc read`, read-only):
 // a received message is pasted as <hc from="t64">…</hc>, a sent one is a `hc send t7m "…"` command.
 // Both sides are matched up, so one message counts once. Agents started by another (`hc run`) get a
@@ -9,7 +9,7 @@
 
 import { View, div, svg, PathBuilder } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { agents, terminals, hc, exec, home, layout, run, settings, window as win, props, nextCommand } from "herdr";
+import { agents, terminals, hc, exec, home, layout, run, settings, theme, window as win, props, nextCommand } from "herdr";
 import { Nav, footer } from "./nav.js";
 
 const ASSET = "mods/cockpit-talk";
@@ -18,22 +18,20 @@ const STEPS = 8; // waypoints the dot moves through, so it follows the curve ins
 const RING_MS = 650; // the receiver's ring fading out
 const HOT_MS = 8000; // how long a connector stays lit after a message
 const SHOWN_EVERY = 2500, HIDDEN_EVERY = 4; // read every 2.5 s while shown, every 4th tick while hidden
-const NODE_H = 74;
-const DOT = 24; // the Map's background dots: fixed to the screen
+const NODE_H = 70;
+const HEADER_H = 41;
+const TOP = 12; // the canvas's top margin above the cards
+const DOT = 24; // the background dots: fixed to the screen
 const KEEP = 200;
 const STORE = "cockpit-talk";
-const SANS = "Geist", MONO = "Geist Mono";
+const mono = () => settings()?.font_family ?? "JetBrains Mono";
 
-// The Map's tokens (agenttrail's public/index.html :root), so this view and the Map are one product.
-const DARK = { bg: "#000000", surface: "#181818", raised: "#1f1f1f", hover: "#272727", line: "#313131", text: "#ffffff", soft: "#d1d1d1", dim: "#9b9b9b", faint: "#686868", accent: "#e9a23b", danger: "#db6b67", success: "#7aa36a", done: "#3f7f57", card: "#181818", cardLive: "#2f271c", cardHover: "#1f1f1f", overlay: "#181818", dot: "#31313159", openai: "#e8e8ea" };
-const LIGHT = { ...DARK, bg: "#ffffff", surface: "#f9f8f7", raised: "#f3f2f0", hover: "#eeecea", line: "#00000024", text: "#000000", soft: "#000000c7", dim: "#666666", faint: "#0000007a", accent: "#955f12", success: "#3f7f57", card: "#ffffff", cardLive: "#fdf5e9", cardHover: "#f9f8f7", overlay: "#ffffff", dot: "#00000018", openai: "#111111" };
-const lit = () => settings()?.dark === false;
 const MARK = { claude: "claude", "claude-code": "claude", codex: "codex", chatgpt: "codex", openai: "codex" };
 const markOf = (app) => (app ? MARK[String(app).toLowerCase()] ?? null : null);
-const markColor = (c, key) => (key === "claude" ? "#d97757" : key === "codex" ? c.openai : c.dim);
 const WORD = { working: "Working", blocked: "Needs you", done: "Done", idle: "Idle" };
-const tone = (c, status) => ({ working: c.accent, blocked: c.danger, done: c.success })[status] ?? c.dim;
-const ease = (t) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
+const tone = (t, status) => ({ working: t.working, blocked: t.blocked, done: t.done })[status] ?? t.dim;
+const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+const ease = (x) => (x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2);
 
 const clean = (s) => (s ?? "").replace(/^[^\p{L}\p{N}~/]+/u, "").trim();
 const norm = (s) => s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "").slice(0, 28);
@@ -74,6 +72,9 @@ function bez(l, t) {
   const u = 1 - t, a = u * u * u, b = 3 * u * u * t, d = 3 * u * t * t, e = t * t * t;
   return { x: a * l.p0.x + b * l.c1.x + d * l.c2.x + e * l.p1.x, y: a * l.p0.y + b * l.c1.y + d * l.c2.y + e * l.p1.y };
 }
+
+// The one brand colour kept on purpose: the user wants Claude's logo in Claude orange.
+const CLAUDE = "#d97757";
 
 export default class AgentTalk extends View {
   init(_props, cx) {
@@ -410,18 +411,18 @@ export default class AgentTalk extends View {
     return PathBuilder.fill().add_polygon([[l.p1.x, l.p1.y], [bx - uy * s * 0.6, by + ux * s * 0.6], [bx + uy * s * 0.6, by - ux * s * 0.6]], true).build();
   }
 
-  // Connectors in the Map's styles: solid in the line colour, dashed in amber while a message is
-  // fresh, dotted and faint for "started by".
-  edges(c, m, pos, NW, lanes, curve, W, H) {
+  // Connectors: solid in the border colour, dashed in the "working" colour while a message is fresh,
+  // dotted and dim for "started by".
+  edges(t, m, pos, NW, lanes, curve, W, H) {
     const paint = (path, color) => window.paint_path(path, color).absolute().left(0).top(0).w(W).h(H);
     const out = [];
     for (const s of m.spawns) {
       const A = pos[s.from], B = pos[s.to];
       if (!A || !B || lanes[`${s.from}>${s.to}`] || lanes[`${s.to}>${s.from}`]) continue;
-      out.push(paint(this.path(curve(A, B, 0), 1.5, [2, 7]), c.faint));
+      out.push(paint(this.path(curve(A, B, 0), 1.5, [2, 7]), t.dim));
     }
     for (const l of Object.values(lanes)) {
-      const color = l.hot ? c.accent : c.line;
+      const color = l.hot ? t.working : t.border;
       out.push(paint(this.path(l, l.hot ? 2 : 1.5, l.hot ? [5, 8] : null), color));
       out.push(paint(this.head(l), color));
     }
@@ -429,7 +430,7 @@ export default class AgentTalk extends View {
   }
 
   // What a connector says, beside its middle: who just spoke (`t64 ⇢`), else how many messages went.
-  labels(c, m, lanes) {
+  labels(t, m, lanes) {
     return m.pairs.map((p) => {
       const ls = [lanes[`${p.a}>${p.b}`], lanes[`${p.b}>${p.a}`]].filter(Boolean);
       if (!ls.length) return null;
@@ -437,23 +438,25 @@ export default class AgentTalk extends View {
       const mid = bez(ls[ls.length - 1], 0.5);
       const total = ls.reduce((n, l) => n + l.n, 0);
       const ab = p.n[`${p.a}>${p.b}`] ?? 0, ba = p.n[`${p.b}>${p.a}`] ?? 0;
-      return div().id(`label-${p.a}-${p.b}`).absolute().left(mid.x + 10).top(mid.y - 8).whitespace_nowrap()
-        .text_size(10.5).font_family(MONO).font_weight(hot ? 650 : 500).text_color(hot ? c.accent : c.faint)
-        .tooltip(`${p.a} → ${p.b}: ${ab} · ${p.b} → ${p.a}: ${ba}`)
+      return div().id(`label-${p.a}-${p.b}`).absolute().left(mid.x + 10).top(mid.y - 9).h(18).px(5).flex().items_center()
+        .rounded(4).border(1).border_color(hot ? t.working + "66" : t.border).bg(hot ? t.working + "1a" : t.chrome)
+        .whitespace_nowrap().text_size(10.5).font_family(mono()).font_medium().text_color(hot ? t.working : t.dim)
+        .tooltip(`${p.a} → ${p.b}: ${plural(ab, "message")} · ${p.b} → ${p.a}: ${plural(ba, "message")}`)
         .child(hot ? `${hot.from} ⇢` : `×${total}`);
     }).filter(Boolean);
   }
 
-  // The Map's card status icon, 18px at the top right.
-  statusIcon(c, n) {
-    const box = () => div().absolute().top(10).right(10).w(18).h(18).rounded(9).flex().items_center().justify_center();
-    if (n.gone) return box().border(2).border_color(c.line);
-    if (n.status === "working") return div().absolute().top(8).right(8).w(22).h(22)
-      .child(div().absolute().left(2).top(2).w(18).h(18).rounded(9).border(2).border_color(c.line))
-      .child(svg(`${ASSET}/arc-status.svg`).absolute().left(0).top(0).w(22).h(22).text_color(c.accent).spin(1100));
-    if (n.status === "blocked") return box().bg(c.danger).text_size(12).font_weight(700).text_color("#ffffff").child("!");
-    if (n.status === "done") return box().bg(c.done).child(svg(`${ASSET}/check.svg`).w(18).h(18).text_color("#ffffff"));
-    return box().border(2).border_color(c.faint);
+  // A status glyph sized to sit on the card's text line, as Automations draws its last run. Static on
+  // purpose: an agent works for minutes at a time, and a spinner repaints the window every frame.
+  mark(t, n) {
+    const dot = (color) => div().size(7).mx(2).flex_none().rounded(4).bg(color);
+    const ring = (color) => div().size(7).mx(2).flex_none().rounded(4).border(1.5).border_color(color);
+    if (n.gone) return ring(t.dim);
+    if (n.status === "blocked") return div().size(14).flex_none().rounded(4).bg(t.blocked + "26").text_size(10).font_bold()
+      .text_color(t.blocked).flex().items_center().justify_center().child("!");
+    if (n.status === "working") return dot(t.working);
+    if (n.status === "done") return dot(t.done);
+    return ring(t.dim);
   }
 
   onKey(e, cx) {
@@ -467,67 +470,60 @@ export default class AgentTalk extends View {
     cx.notify();
   }
 
-  card(c, n, p, NW, hot, on = false) {
+  // A card in the MR list's look: bordered, chrome background; the keyboard's pick gets the accent
+  // border, a card in a fresh message gets the "working" one.
+  card(t, n, p, NW, hot, on = false) {
     const word = n.gone ? "Ended" : WORD[n.status] ?? (n.agent ? "Agent" : "Terminal");
     const kb = n.gone ? null : this.mem.get(n.addr) ?? null;
     const memText = kb == null ? null : kb >= 1048576 ? `${(kb / 1048576).toFixed(1)} GB` : `${Math.round(kb / 1024)} MB`;
     return div().id(`node-${n.addr}`).absolute().left(p.x - NW / 2).top(p.y - NODE_H / 2).w(NW).h(NODE_H)
       .transition("left", { duration: 300, easing: "ease-in-out" }).transition("top", { duration: 300, easing: "ease-in-out" })
-      .rounded(12).bg(on ? c.cardHover : hot ? c.cardLive : c.card).border(hot || on ? 1.5 : 1).border_color(on || hot ? c.accent : c.line)
-      .when(n.gone, (el) => el.opacity(0.5))
-      .cursor_pointer().hover((s) => s.bg(c.cardHover).border_color(hot ? c.accent : c.faint))
-      .tooltip(`${n.where} · ${n.addr} · ${word}${memText ? ` · ${memText} memory (the agent and everything it started)` : ""}. Click to go there`)
+      .rounded(8).border(1)
+      .border_color(on ? t.accent : hot ? t.working : n.status === "blocked" && !n.gone ? t.blocked + "55" : t.border)
+      .bg(on ? t.selected : hot ? t.working + "14" : t.chrome)
+      .when(n.gone, (el) => el.opacity(0.55))
+      .cursor_pointer().hover((s) => s.bg(on ? t.selected : t.hover)).active((s) => s.bg(t.selected))
+      .tooltip(`${n.label}\n${n.where} · ${n.addr} · ${word}${memText ? ` · ${memText} memory (the agent and everything it started)` : ""}. Click to go there`)
       .accessibility_label(`${n.label}, ${n.addr}, ${word}${memText ? `, ${memText} memory` : ""}. Go there`)
       .on_click(() => run("agent.focus", { terminal: n.addr }))
-      .child(v_flex().size_full().pl(12).pr(36).py(10).gap(2).justify_center()
-        .child(h_flex().h(14).gap(5).items_center()
-          .when(Boolean(n.mark), (el) => el.child(svg(`${ASSET}/agent-${n.mark}.svg`).w(11).h(11).flex_none().text_color(markColor(c, n.mark))))
-          .child(div().text_size(10.5).font_family(MONO).font_weight(500).text_color(c.faint).child(n.addr)))
-        .child(div().h(19).truncate().text_size(13.5).line_height("19px").font_weight(600).text_color(c.text).child(n.label))
-        .child(h_flex().h(16).gap(6).items_center().min_w(0)
-          .child(div().flex_none().text_size(11.5).line_height("16px").font_weight(500).text_color(n.gone ? c.faint : tone(c, n.status)).child(word))
+      .child(v_flex().size_full().px(10).py(8).gap(3).justify_center().min_w(0)
+        .child(h_flex().h(14).gap(5).items_center().min_w(0)
+          .when(Boolean(n.mark), (el) => el.child(svg(`${ASSET}/agent-${n.mark}.svg`).size(11).flex_none().text_color(n.mark === "claude" ? CLAUDE : t.muted)))
+          .child(div().min_w(0).truncate().text_size(10.5).font_family(mono()).text_color(t.dim).child(n.addr)))
+        .child(div().h(18).min_w(0).truncate().text_size(12.5).line_height("18px").font_medium().text_color(t.foreground).child(n.label))
+        .child(h_flex().h(16).gap(5).items_center().min_w(0).text_size(11.5)
+          .child(this.mark(t, n))
+          .child(div().flex_none().font_medium().text_color(n.gone ? t.dim : tone(t, n.status)).child(word))
           .when(Boolean(memText), (el) => el
-            .child(div().flex_none().text_size(11.5).text_color(c.faint).child("·"))
-            .child(div().min_w(0).truncate().text_size(11).font_family(MONO).text_color(c.dim).child(memText)))))
-      .child(this.statusIcon(c, n));
+            .child(div().flex_none().text_color(t.dim).child("·"))
+            .child(div().min_w(0).truncate().text_size(11).font_family(mono()).text_color(t.dim).child(memText)))));
   }
 
-  // The Map's dot grid: dashed lines, so a whole field costs a few paths.
-  grid(c, W, H) {
-    const key = `${W}x${H}|${lit()}`;
+  // Background dots: dashed lines, so a whole field costs a few paths.
+  grid(t, W, H) {
+    const key = `${W}x${H}`;
     if (this.gridCache?.key !== key) {
       let path = PathBuilder.stroke(2).dash_array([2, DOT - 2]);
       for (let y = 1; y < H; y += DOT) path = path.move_to(0, y).line_to(W, y);
       this.gridCache = { key, path: path.build() };
     }
-    return window.paint_path(this.gridCache.path, c.dot).absolute().left(0).top(0).w(W).h(H);
+    return window.paint_path(this.gridCache.path, t.border).absolute().left(0).top(0).w(W).h(H);
   }
 
-  chip(c, text) {
-    return div().absolute().left(12).top(12).px(10).py(5).rounded(10).border(1).border_color(c.line).bg(c.overlay)
-      .whitespace_nowrap().text_size(10.5).font_weight(600).font_family(MONO).text_color(c.faint).child(text);
-  }
-
-  canvas(c, m, W, H) {
-    const hotAny = this.events.some((e) => e.at && m.now - e.at < HOT_MS);
-    const pairs = m.pairs.length, msgs = this.events.length;
-    const label = msgs
-      ? `${hotAny ? "NOW" : "EARLIER"} · ${pairs} ${pairs === 1 ? "PAIR" : "PAIRS"} · ${msgs} ${msgs === 1 ? "MESSAGE" : "MESSAGES"}`
-      : `WATCHING ${agents().length} AGENTS`;
-    const box = div().id("talk-canvas").relative().flex_none().w(W).h(H).overflow_hidden().bg(c.bg).child(this.grid(c, W, H)).child(this.chip(c, label))
-      .when(msgs > 0, (el) => el.child(div().id("talk-clear").absolute().top(10).right(10).h(28).px(10).flex().items_center().rounded(8)
-        .text_size(11).font_family(MONO).text_color(c.dim).cursor_pointer()
-        .hover((s) => s.bg(c.hover).text_color(c.text)).active((s) => s.bg(c.raised))
-        .tooltip("Clear the list (messages already seen stay counted)")
-        .on_click((_e, cx) => this.clear(cx)).child("Clear")));
+  canvas(t, m, W, H) {
+    const box = div().id("talk-canvas").relative().flex_none().w(W).h(H).overflow_hidden().bg(t.chrome);
     if (!m.nodes.length) {
-      return box.child(v_flex().absolute().left(0).top(48).w(W).px(24).gap(6)
-        .child(div().text_size(15).font_weight(600).text_color(c.text).child("No messages yet"))
-        .child(div().text_size(13).text_color(c.dim).child("When one agent sends another a message with hc send, they appear here as cards, and the message runs along the line between them.")));
+      const watched = agents().length;
+      return box.child(v_flex().id("talk-empty").absolute().left(0).top(0).w(W).py(28).px(16).gap(8).items_center()
+        .child(svg("mods/cockpit-tabs/talk.svg").size(20).text_color(t.dim))
+        .child(div().font_medium().child("No messages yet"))
+        .child(div().text_size(12).text_color(t.dim).text_center().whitespace_normal()
+          .child("When one agent sends another a message with hc send, both show up here as cards, and the message runs along the line between them."))
+        .child(div().text_size(11.5).text_color(t.muted).child(watched ? `Watching ${plural(watched, "agent")}` : "No agents running")));
     }
     // The cards keep a readable spread and sit in the middle of a tall panel, so lines never stretch.
-    const band = Math.min(H - 52, Math.max(300, W * 0.85));
-    const y0 = 52 + (H - 52 - band) / 2;
+    const band = Math.min(H - TOP, Math.max(300, W * 0.85));
+    const y0 = TOP + (H - TOP - band) / 2;
     const { pos, NW } = this.place(m, W, y0 + band, y0);
     const { lanes, curve } = this.lanes(m, pos, NW);
     const hot = new Set();
@@ -538,52 +534,70 @@ export default class AgentTalk extends View {
       const at = bez(l, ease(f.k / STEPS));
       const move = (el) => el.transition("left", { duration: FLY_MS / STEPS, easing: "linear" }).transition("top", { duration: FLY_MS / STEPS, easing: "linear" });
       return [
-        move(div().id(`glow-${f.id}`).absolute().left(at.x - 9).top(at.y - 9).size(18).rounded(9).bg(c.accent + "40")),
-        move(div().id(`dot-${f.id}`).absolute().left(at.x - 4.5).top(at.y - 4.5).size(9).rounded(5).bg(c.accent)),
+        move(div().id(`glow-${f.id}`).absolute().left(at.x - 9).top(at.y - 9).size(18).rounded(9).bg(t.working + "40")),
+        move(div().id(`dot-${f.id}`).absolute().left(at.x - 4.5).top(at.y - 4.5).size(9).rounded(5).bg(t.working)),
       ];
     }).filter(Boolean).flat();
     const rings = this.rings.map((r) => {
       const p = pos[r.at];
       if (!p) return null;
-      return div().id(`ring-${r.id}`).absolute().left(p.x - NW / 2 - 5).top(p.y - NODE_H / 2 - 5).w(NW + 10).h(NODE_H + 10)
-        .rounded(16).border(2).border_color(c.accent).opacity(r.fade ? 0 : 1)
+      return div().id(`ring-${r.id}`).absolute().left(p.x - NW / 2 - 4).top(p.y - NODE_H / 2 - 4).w(NW + 8).h(NODE_H + 8)
+        .rounded(11).border(2).border_color(t.working).opacity(r.fade ? 0 : 1)
         .transition("opacity", { duration: RING_MS, easing: "ease-out" });
     }).filter(Boolean);
-    // Ports where connectors meet the cards, as the Map's side ports.
+    // Ports where connectors meet the cards.
     const ports = new Map();
     for (const l of Object.values(lanes)) for (const q of [l.p0, l.p1]) ports.set(`${Math.round(q.x)}:${Math.round(q.y)}`, q);
     return box
-      .children(this.edges(c, m, pos, NW, lanes, curve, W, H))
-      .children(this.labels(c, m, lanes))
+      .child(this.grid(t, W, H))
+      .children(this.edges(t, m, pos, NW, lanes, curve, W, H))
+      .children(this.labels(t, m, lanes))
       .children(rings)
-      .children(m.nodes.map((n, i) => this.card(c, n, pos[n.addr], NW, hot.has(n.addr), this.nav.focused() && this.nav.sel === i)))
-      .children([...ports.values()].map((q) => div().absolute().left(q.x - 4).top(q.y - 4).w(8).h(8).rounded(4).bg(c.raised).border(1).border_color(c.faint)))
+      .children(m.nodes.map((n, i) => this.card(t, n, pos[n.addr], NW, hot.has(n.addr), this.nav.focused() && this.nav.sel === i)))
+      .children([...ports.values()].map((q) => div().absolute().left(q.x - 4).top(q.y - 4).size(8).rounded(4).bg(t.chrome).border(1).border_color(t.dim)))
       .children(dots);
   }
 
-  // The panel's name, in the Map header's look.
-  header(c) {
-    return h_flex().flex_none().h(44).px(12).gap(10).items_center().bg(c.bg).border_b(1).border_color(c.hover)
-      .child(svg("mods/cockpit-tabs/talk.svg").w(16).h(16).flex_none().text_color(c.dim))
-      .child(div().flex_1().min_w(0).truncate().text_size(14).font_weight(600).text_color(this.nav.focused() ? c.accent : c.text).child("Agent talk"));
+  // The panel header, as Merge requests and Automations draw it: the name (accent while it has the
+  // keyboard), coloured counts of what needs a look, then a summary and Clear on the right.
+  header(t, m, kbd) {
+    const live = m.nodes.filter((n) => !n.gone);
+    const blocked = live.filter((n) => n.status === "blocked").length;
+    const working = live.filter((n) => n.status === "working").length;
+    const msgs = this.events.length, pairs = m.pairs.length;
+    const now = this.events.some((e) => e.at && m.now - e.at < HOT_MS);
+    const summary = `${plural(pairs, "pair")} · ${plural(msgs, "message")}`;
+    return h_flex().id("talk-header").flex_none().h(HEADER_H).px(14).pt(4).items_center().gap(8).min_w(0)
+      .child(div().flex_none().text_size(13).font_semibold().text_color(kbd ? t.accent : t.foreground).child("Agent talk"))
+      .child(h_flex().flex_1().min_w(0).gap(8).items_center().overflow_hidden().text_size(11.5).font_medium()
+        .when(blocked > 0, (el) => el.child(div().flex_none().text_color(t.blocked).child(`${blocked} need${blocked === 1 ? "s" : ""} you`)))
+        .when(working > 0, (el) => el.child(div().flex_none().text_color(t.working).child(`${working} working`))))
+      .when(msgs > 0, (el) => el
+        .child(div().id("talk-summary").min_w(0).truncate().text_size(11).text_color(now ? t.working : t.dim)
+          .tooltip(`${now ? "Talking now" : "Last message earlier"} · ${summary}`).child(now ? `now · ${plural(msgs, "message")}` : plural(msgs, "message")))
+        .child(h_flex().id("talk-clear").h(22).px(7).gap(5).items_center().flex_none().rounded(5).border(1).text_size(11.5)
+          .border_color(t.border).bg(t.chrome).text_color(t.muted)
+          .tooltip("Clear the list (c). Messages already seen stay counted").accessibility_label("Clear the message list")
+          .cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground)).active((s) => s.bg(t.selected))
+          .on_click((_e, cx) => { cx.stop_propagation(); this.clear(cx); })
+          .child("Clear")));
   }
 
   render() {
-    const c = lit() ? LIGHT : DARK;
+    const t = theme();
     const W = this.size ? Math.max(220, this.size.width) : null;
     const kbd = this.nav.focused();
-    // Under the 44px header, and above the key footer while the panel has the keyboard.
-    const H = this.size ? Math.max(260, this.size.height - 44 - (kbd ? (this.nav.help ? 64 : 32) : 0)) : 0;
+    // Under the header, and above the key footer while the panel has the keyboard.
+    const H = this.size ? Math.max(260, this.size.height - HEADER_H - (kbd ? (this.nav.help ? 64 : 32) : 0)) : 0;
     const m = this.model();
     this.nodeIds = m.nodes.map((n) => n.addr);
     this.nav.clamp(this.nodeIds.length);
-    return v_flex().id("talk-root").size_full().bg(c.bg).font_family(SANS).text_color(c.text)
+    return v_flex().id("talk-root").size_full().min_w(0).min_h(0).bg(t.chrome).text_color(t.foreground).text_size(13)
       .track_focus(this.nav.handle).on_mouse_down("left", () => this.nav.focus()).on_key_down((e, cx) => this.onKey(e, cx))
       .on_size_change((size, cx) => { if (size.width !== this.size?.width || size.height !== this.size?.height) { this.size = size; cx.notify(); } })
-      .child(this.header(c))
-      .when(Boolean(W), (el) => el.child(this.canvas(c, m, W, H)))
-      // The footer in the Map's own colours.
-      .when(kbd, (el) => el.child(footer({ h_flex, div }, { border: c.hover, chrome: c.bg, dim: c.faint, muted: c.dim },
+      .child(this.header(t, m, kbd))
+      .when(Boolean(W), (el) => el.child(this.canvas(t, m, W, H)))
+      .when(kbd, (el) => el.child(footer({ h_flex, div }, t,
         [["j k", "pick an agent"], ["↵ o", "go to it"], ["c", "clear"]], this.nav.help)));
   }
 }

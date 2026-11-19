@@ -261,6 +261,17 @@ export default class Tasks extends View {
     this.refreshReport();
   }
 
+  // Reads tasks.json again (after any queued save), for edits made outside the panel.
+  reload(cx) {
+    this.queue = this.queue.then(async () => {
+      try {
+        if (await fs.exists(`${this.dir}/tasks.json`)) this.tasks = ranked(JSON.parse(await fs.readFile(`${this.dir}/tasks.json`, "utf8")));
+        this.headNote = null;
+      } catch { this.headNote = "Couldn't read saved tasks."; }
+      cx.notify();
+    });
+  }
+
   // Once a report has been opened, each save rewrites it; the page reloads when you come back to its tab.
   refreshReport() {
     const out = `${this.dir}/report.html`;
@@ -703,6 +714,9 @@ export default class Tasks extends View {
       .when(!on, (el) => el.border(1).border_color(t.border).text_color(t.dim))
       .when(Boolean(action), (el) => el.cursor_pointer()
         .hover((s) => s.bg(color + (on ? "33" : "14")).text_color(color)).active((s) => s.bg(color + "40"))
+        // The press must not reach the card header: a click's stop_propagation also swallows the
+        // pane's mouse-up, so a leftover press would turn the next mouse move into a drag (dimmed card).
+        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
         .on_click((_e, cx) => { cx.stop_propagation(); action(cx); }))
       .child(on ? svg(`mods/cockpit-tasks/${icon}`).size(10).flex_none() : svg(`${ICONS}/plus.svg`).size(10).flex_none())
       .child(label);
@@ -726,6 +740,7 @@ export default class Tasks extends View {
       .tooltip(`${LABEL[task.status]}. Click to mark ${LABEL[next].toLowerCase()}`)
       .accessibility_label(`${LABEL[task.status]}. Mark ${LABEL[next].toLowerCase()}`)
       .hover((s) => s.bg(t.hover)).active((s) => s.bg(t.selected))
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
       .on_click((_e, cx) => {
         cx.stop_propagation();
         if (this.drag) return; // the release that ends a drag is not a click
@@ -816,6 +831,7 @@ export default class Tasks extends View {
     const chip = (id, text, color, tip, onClick) => div().id(id).flex_none().h(18).px(6).flex().items_center().rounded(9).bg(color + "1f")
       .text_size(10.5).font_medium().text_color(color).cursor_pointer().tooltip(tip).accessibility_label(tip)
       .hover((s) => s.bg(color + "33")).active((s) => s.bg(color + "40"))
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
       .on_click((_e, cx) => { cx.stop_propagation(); onClick(cx); })
       .child(text);
     const dragging = this.drag === task.id;
@@ -933,6 +949,7 @@ export default class Tasks extends View {
                 .on_click((_e, cx) => {
                   cx.stop_propagation();
                   this.menuFor = this.menuFor === task.id ? null : task.id;
+                  this.menuOff = 0;
                   cx.notify();
                 })
                 .child(svg(`mods/cockpit-tasks/chevron-${this.menuFor === task.id ? "up" : "down"}.svg`).size(12))))
@@ -1038,14 +1055,25 @@ export default class Tasks extends View {
       .when(Boolean(a), (el) => el.child(dot(a)))
       .child(div().w(12).flex_none().flex().items_center().justify_center().when(picked, (el) => el.child(svg(`${ICONS}/check.svg`).size(12).text_color(t.foreground))));
     // A scroll area needs a definite height: rows are 30px with a 1px gap, plus the divider and padding.
-    const height = Math.min(240, 8 + (sorted.length + 1) * 31 + (sorted.length ? 7 : 0) + (sorted.length ? 0 : 36));
-    return v_flex().id(`task-menu-${task.id}`).h(height).flex_none().p(4).gap(1).rounded(8).border(1).border_color(t.border).bg(t.popover).overflow_y_scrollbar()
+    const content = 8 + (sorted.length + 1) * 31 + (sorted.length ? 7 : 0) + (sorted.length ? 0 : 36);
+    const height = Math.min(240, content);
+    // The wheel is handled here, not by GPUI's scroll area: that one passes the wheel on to the task
+    // list behind it at its top and bottom edges. Rows sit in an inner column shifted by the offset.
+    const max = Math.max(0, content - (height - 2));
+    const off = Math.min(this.menuOff ?? 0, max);
+    return div().id(`task-menu-${task.id}`).relative().h(height).w_full().flex_none().rounded(8).border(1).border_color(t.border).bg(t.popover).overflow_hidden()
+      .on_scroll_wheel((e, cx) => {
+        cx.stop_propagation();
+        const next = Math.max(0, Math.min((this.menuOff ?? 0) - e.delta.y, max));
+        if (next !== this.menuOff) { this.menuOff = next; cx.notify(); }
+      })
+      .child(v_flex().absolute().top(-off).left(0).right(0).p(4).gap(1)
       .child(row(`menu-follow-${task.id}`, null, active ? `Active agent · ${clean(active.title) || active.program?.name || active.address}` : "Active agent (none focused)", following,
         () => { this.pick = null; }))
       .when(sorted.length > 0, (el) => el.child(div().h(1).my(3).bg(t.border).flex_none()))
       .when(!sorted.length, (el) => el.child(div().p(8).text_size(12).text_color(t.dim).child("No agents running")))
       .children(sorted.map((a) => row(`menu-${task.id}-${a.address}`, a, clean(a.title) || a.program?.name || a.address, !following && target?.address === a.address,
-        () => { this.pick = a.address; })));
+        () => { this.pick = a.address; }))));
   }
 
   // A group heading. Its count is in the filter above; a collapsible group (Done) is quieter.
@@ -1164,6 +1192,7 @@ export default class Tasks extends View {
         .child(h_flex().items_center().gap(8).px(2)
           .child(div().text_size(13).font_semibold().text_color(kbd ? t.accent : t.foreground).child("Tasks"))
           .child(div().flex_1())
+          .child(this.iconButton(t, "task-reload", "mods/cockpit-tasks/refresh.svg", "Reload tasks from disk", (cx) => this.reload(cx)))
           .child(this.iconButton(t, "task-report", "mods/cockpit-tasks/chart.svg", this.reporting ? "Building report…" : "See report in the browser",
             (cx) => this.report(cx), this.reporting ? t.accent : null))
           .child(this.iconButton(t, "task-new", `${ICONS}/plus.svg`, "New task with details and links", (cx) => this.edit(null, cx))))
