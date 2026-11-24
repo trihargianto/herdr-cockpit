@@ -126,7 +126,7 @@ svg text { fill: var(--dim); font-size: 10.5px; font-family: inherit; }
 .tr.th { border-top: 0; color: var(--dim); font-size: 11.5px; font-weight: 500; padding-top: 0; }
 .tr.th button { all: unset; cursor: pointer; } .tr.th button:hover { color: var(--fg); }
 .c-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.c-key { width: 86px; flex: none; } .c-status { width: 70px; flex: none; } .c-date { width: 92px; flex: none; color: var(--muted); font-variant-numeric: tabular-nums; }
+.c-key { width: 86px; flex: none; } .c-status { width: 76px; flex: none; white-space: nowrap; } .c-date { width: 92px; flex: none; color: var(--muted); font-variant-numeric: tabular-nums; }
 .c-dur { width: 70px; flex: none; text-align: right; font-variant-numeric: tabular-nums; } .c-agent { width: 64px; flex: none; color: var(--muted); }
 .key { font-family: ui-monospace, "JetBrains Mono", monospace; font-size: 11.5px; color: var(--accent); text-decoration: none; }
 .key:hover { text-decoration: underline; }
@@ -450,10 +450,10 @@ dialog[open]::backdrop { animation: fade 180ms ease-out; }
   }
 
   function renderStatus(scoped) {
-    const c = { todo: 0, doing: 0, done: 0 };
+    const c = { todo: 0, doing: 0, review: 0, done: 0 };
     for (const r of scoped) if (r.status in c) c[r.status]++;
     const blocked = scoped.filter((r) => r.blocked).length;
-    hbars($("status"), [["Doing", c.doing, "var(--doing)"], ["To do", c.todo, "var(--todo)"], ["Blocked", blocked, "var(--blocked)"], ["Done", c.done, "var(--done)"]], null);
+    hbars($("status"), [["Doing", c.doing, "var(--doing)"], ["On Review", c.review, "var(--accent)"], ["To do", c.todo, "var(--todo)"], ["Blocked", blocked, "var(--blocked)"], ["Done", c.done, "var(--done)"]], null);
   }
 
   function renderWeekday(finished) {
@@ -465,14 +465,14 @@ dialog[open]::backdrop { animation: fade 180ms ease-out; }
       '<div class="col" data-tip="' + names[i] + ": " + v + '"><div class="stem"><div class="fill" style="height:' + (100 * v / max) + '%"></div></div><span>' + names[i] + "</span></div>").join("") + "</div>";
   }
 
-  const STATUS = { todo: ["To do", "var(--todo)"], doing: ["Doing", "var(--doing)"], done: ["Done", "var(--done)"],
+  const STATUS = { todo: ["To do", "var(--todo)"], doing: ["Doing", "var(--doing)"], review: ["On Review", "var(--accent)"], done: ["Done", "var(--done)"],
     blocked: ["Blocked", "var(--blocked)"], unblocked: ["Unblocked", "var(--dim)"] };
-  // A blocked task shows as blocked whatever its place in to do / doing.
+  // A blocked task shows as blocked regardless of its workflow status.
   const shownStatus = (r) => STATUS[r.blocked ? "blocked" : r.status] ?? [r.status, "var(--dim)"];
   const COLS = [
     ["title", "Task", "c-title", (r) => r.title.toLowerCase()],
     ["key", "Ticket", "c-key", (r) => r.key ?? "~"],
-    ["status", "Status", "c-status", (r) => ["doing", "todo", "done"].indexOf(r.status)],
+    ["status", "Status", "c-status", (r) => ["todo", "doing", "review", "done"].indexOf(r.status)],
     ["created", "Added", "c-date", (r) => r.created ?? 0],
     ["done", "Done", "c-date", (r) => r.doneAt ?? 0],
     ["lead", "Lead", "c-dur", (r) => r.doneAt && r.created ? r.doneAt - r.created : -1],
