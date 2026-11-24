@@ -5,7 +5,7 @@
 // a command "worktree" opens the worktree dialog instead.
 
 import { View, div, svg } from "gpui-kit";
-import { v_flex, h_flex } from "gpui-base";
+import { v_flex, h_flex, ScrollHandle } from "gpui-base";
 import { run, props, closeOverlay, openOverlay, theme, keys, terminals, spaces, panes, agents, shared, exec } from "herdr";
 
 // Where a space is now: its first terminal's live folder, else where it was made.
@@ -46,6 +46,7 @@ function items(p, git) {
         ...(waiting ? [[`Send ${waiting} ${waiting === 1 ? "annotation" : "annotations"} here`, "annotate-send", { terminal: tg.terminal, pane: inTab ? tg.pane : null }]] : []),
       ];
       return [
+        ...(inTab ? [["Rename pane", "pane.rename", { pane: tg.pane }]] : []),
         ...annotate,
         ...(inTab
           ? [
@@ -100,7 +101,8 @@ function menuIcon(command) {
 function shortcut(name, args) {
   // `pane.split:right` binds pane.split with { direction: "right" }.
   const value = args && Object.values(args)[0];
-  const k = keys().find((b) => b.section === "global" && (b.action === name || b.action === `${name}:${value}`));
+  const bindings = keys().filter((b) => b.action === name || b.action === `${name}:${value}`);
+  const k = bindings.find((b) => b.section === `layout:${shared("layout")}`) ?? bindings.find((b) => b.section === "global");
   return k ? k.keys : "";
 }
 
@@ -108,6 +110,7 @@ export default class Menu extends View {
   init(_props, cx) {
     this.at = 0;
     this.git = null;
+    this.scroll = ScrollHandle.new();
     this.handle = cx.focus_handle();
     this.handle.focus();
     const p = props();
@@ -146,20 +149,24 @@ export default class Menu extends View {
       .track_focus(this.handle)
       .w_full()
       .min_h(0)
+      .overflow_y_scrollbar()
+      .track_scroll(this.scroll)
       .p(5)
       .bg(t.popover)
       .text_size(12.8)
       .on_key_down((e, cx) => {
+        if (!list.length && e.key !== "escape") return;
         if (e.key === "down") this.at = (this.at + 1) % list.length;
         else if (e.key === "up") this.at = (this.at + list.length - 1) % list.length;
         else if (e.key === "enter") this.choose(this.at, cx);
         else if (e.key === "escape") closeOverlay(props().overlay);
         else return;
+        if (e.key === "up" || e.key === "down") this.scroll.scroll_to_item(this.at);
         cx.notify();
       })
       .children(
         list.map((it, i) =>
-          v_flex()
+          v_flex().flex_none()
             .when(i > 0 && (it[1].endsWith(".close") || it[1] === "app.help" || (it[1] === "app.theme" && list[i - 1][1] !== "app.theme")), el => el.child(div().mx(7).my(4).h(1).bg(t.border)))
             .child(h_flex()
             .id(`mi-${i}`)

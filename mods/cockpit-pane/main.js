@@ -6,7 +6,7 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { panes, props, run, theme, home, layout, settings } from "herdr";
+import { panes, props, run, theme, home, layout, settings, openOverlay } from "herdr";
 
 // Match the first visible tab frame, including the active child of a stack.
 function paneFrame(node) {
@@ -86,7 +86,7 @@ export default class Pane extends View {
     const t = theme();
     const p = this.me();
     if (!p) return div();
-    const name = ((p.program?.agent || p.program?.shell) && p.program.name) || p.title || p.program?.name || "shell";
+    const name = p.name || ((p.program?.agent || p.program?.shell) && p.program.name) || p.title || p.program?.name || "shell";
     const pic = icon(p.program, 14, t.dim);
     const st = p.status;
     const pane = p.pane;
@@ -104,6 +104,11 @@ export default class Pane extends View {
       .text_size(12)
       .on_hover((hovered, cx) => { this.hovered = hovered; cx.notify(); })
       .on_click(() => run("pane.focus", { pane }))
+      .on_mouse_down("right", (_e, cx) => {
+        cx.stop_propagation();
+        openOverlay({ mod: "cockpit-menu", kind: "popup", at: "pointer", width: 220, height: 260,
+          props: { tab: "pane", target: { pane, terminal: p.terminal } } });
+      })
       .when(Boolean(pic), (el) => el.child(pic))
       .child(div().id(`ph-name-${pane}`).flex_none().truncate().max_w(260).font_medium().text_color(t.foreground).tooltip(name).child(name))
       .when(Boolean(p.terminal), (el) => el.child(this.address(t, p.terminal)))

@@ -1,6 +1,11 @@
 {
   "layout:cockpit": {
     "cmd-p": "mod.open:cockpit-picker",
+    "cmd-alt-left": "pane.resize:left",
+    "cmd-alt-right": "pane.resize:right",
+    "cmd-alt-up": "pane.resize:up",
+    "cmd-alt-down": "pane.resize:down",
+    "cmd-alt-r": "pane.rename",
     "ctrl-b": "mod.open:cockpit-leader",
     "cmd-b": "cockpit-tabs.sidebar",
     "cmd-g": "cockpit-tabs.key-review",
