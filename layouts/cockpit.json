@@ -296,6 +296,17 @@
               ],
               "gap": 12,
               "resizable": true
+            },
+            {
+              "id": "panel-rail",
+              "type": "block",
+              "size": {
+                "px": 46
+              },
+              "resizable": false,
+              "content": {
+                "mod": "cockpit-panel-menu"
+              }
             }
           ]
         },

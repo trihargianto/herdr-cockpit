@@ -34,7 +34,8 @@ with `Ctrl-C` and the layout stays. Check [Requirements](#requirements) first if
 | --- | --- |
 | Sidebar, top | **Spaces**: coloured avatars, a status badge per space (needs you, working, done), the repo's branch when it is unusual, `Ctrl+1` to `Ctrl+9` hints. |
 | Sidebar, bottom | **Agents**: counts by status that double as filters, sections in order of urgency, each agent's title, time in state, address and branch. |
-| Tab bar | Tabs with `Cmd+1` to `Cmd+9` hints, **+** and **Neovim**, then two groups of panel buttons: what needs you (**Home**, **Inbox**, **MRs**, **Tasks**) and tools (**Annotations**, **Agent talk**, **Monitoring**, **Ports**), then a **Panels** menu for the rest. Counters on Inbox, MRs (red when one of your pipelines failed), Tasks, Annotations and Ports. Click a button to open its pane at the top; right-click opens it in the lower half (a short line under the icon marks it). |
+| Tab bar | Tabs with `Cmd+1` to `Cmd+9` hints, **+** and **Neovim**. |
+| Right activity rail | Click an icon to open its panel or click it again to close the sidebar. Drag icons to reorder them. Right-click a supported panel to toggle it in the lower half. Badges show counts for Inbox, MRs, Tasks, Annotations, and Ports. |
 | Pane header | Program, folder, branch and the terminal's Herdr address. |
 | Status bar | Machine, address, folder, branch; then chips that appear only when they matter: agents that need you, failed pipelines, Herdr errors, an automation due within the hour, quiet mode, Claude's 5-hour limit (amber past 70%, red past 90%), CPU and memory. Each opens the pane behind it. |
 | Dock icon | A badge with the agents that need you plus your failed pipelines. |
@@ -272,12 +273,12 @@ terminal list and a space's stored folder only record where something started, s
 | --- | --- |
 | `layouts/cockpit.json` | Window structure, sizes, pane frames, the side panel's two stacks |
 | `layouts/cockpit.svg` | The preview Herdr's settings screen shows |
-| `mods/cockpit-tabs` | Tab bar, panel buttons, counters, Neovim button, and the feed (`feed.js`, `feedlib.js`) |
+| `mods/cockpit-tabs` | Tab bar, Neovim button, panel commands, and the feed (`feed.js`, `feedlib.js`) |
 | `mods/cockpit-home` | Home pane; `work.js` joins a task to its Jira card, branch, agent and MR |
 | `mods/cockpit-spaces`, `cockpit-dashboard` | Sidebar: spaces list and agents panel |
 | `mods/cockpit-pane` | Pane headers |
 | `mods/cockpit-workspace-chrome`, `cockpit-workspace-status` | Sidebar top row and footer; status bar |
-| `mods/cockpit-leader`, `cockpit-picker`, `cockpit-panel-menu` | `Ctrl+B` leader, `Cmd+P` switcher, the Panels menu |
+| `mods/cockpit-leader`, `cockpit-picker`, `cockpit-panel-menu` | `Ctrl+B` leader, `Cmd+P` switcher, and the right activity rail |
 | `mods/cockpit-annotate` | Annotations: the note dialog and the side pane. `annolib.js` (also in `cockpit-tabs`, which captures selections, sends the queue and runs Plannotator reviews) holds the note format and message |
 | `mods/cockpit-menu` | The terminal right-click menu: Herdr's items plus Annotate, Send annotations here and Review last reply |
 | `mods/cockpit-inbox`, `cockpit-tasks`, `cockpit-mrs`, `cockpit-projects`, `cockpit-usage`, `cockpit-ports`, `cockpit-review`, `cockpit-talk`, `cockpit-automations` | The other side panes |

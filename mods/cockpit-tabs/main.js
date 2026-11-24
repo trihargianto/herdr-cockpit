@@ -14,10 +14,6 @@ function find(node, id) {
   return null;
 }
 
-// The agents' own helpers listen on ports too: they are not your dev servers.
-const TOOLS = new Set(["claude", "codex", "hc", "herdr-core", "herdr-app"]);
-const VERSION = /^\d+\.\d+\.\d+$/;
-
 // The side panels. The upper stack ("panel-body") holds every one; the lower stack ("panel-lower")
 // holds copies of these, so two can show at once. Only panes that read their data: two copies of
 // Tasks would each save their own list over the other's.
@@ -57,15 +53,12 @@ export default class Tabs extends View {
     this.barWidth = null; // the tab bar's width, to drop the labels when it gets tight
     this.pressed = null;
     this.scroll = ScrollHandle.new();
-    try { this.panelOrder = JSON.parse(localStorage.getItem("panel-order") ?? "[]"); } catch { this.panelOrder = []; }
-    if (!Array.isArray(this.panelOrder)) this.panelOrder = [];
-    this.panelPress = null;
-    this.panelDrop = null;
-    this.panelDragged = false;
-    this.skipPanelClick = false;
-    // Counter for the Tasks button. Merge requests come from the feed (shared "cockpit.mrs").
-    this.todo = 0;
-    this.servers = 0;
+    if (!checking() && shared("cockpit.panel-order") == null) {
+      // Bring over the order saved when these controls lived in the tab bar.
+      let order;
+      try { order = JSON.parse(localStorage.getItem("panel-order") ?? "null"); } catch {}
+      if (Array.isArray(order) && order.length) setShared("cockpit.panel-order", order);
+    }
     // One-time move from the old name (Herdr Studio): your project list, quiet mode and dismissed
     // errors live in shared state under "studio.*". The old keys stay as they were.
     if (!checking()) {
@@ -88,10 +81,6 @@ export default class Tabs extends View {
     if (!checking()) cx.timer.every(1000, (cx) => this.drainAnnotations(cx));
     // Plannotator reviews you opened: their results come back as files, looked for while any is open.
     if (!checking()) cx.timer.every(3000, (cx) => this.checkReviews(cx));
-    this.readTodo(cx);
-    this.countServers(cx);
-    cx.timer.every(30000, (cx) => this.countServers(cx));
-    cx.timer.every(5000, (cx) => this.readTodo(cx));
   }
 
   command(c, cx) {
@@ -455,107 +444,12 @@ export default class Tabs extends View {
     });
   }
 
-  // Dev servers running: listeners on a TCP port started from a project folder, leaving out the
-  // agents' own helpers. The same rule as the Ports pane. Read-only `lsof` and `ps`, every ten seconds
-  // while the window is in front.
-  countServers(cx) {
-    if (!window()?.active || this.scanning) return;
-    // The Ports pane, when shown, scans every 10 seconds and shares its count: no second `lsof`.
-    const root = layout(), panel = find(root, "panel"), body = find(root, "panel-body"), lower = find(root, "panel-lower");
-    const portsShown = panel && !panel.hidden && (body?.active === "ports" || (lower && !lower.hidden && lower.active === "lower-ports"));
-    if (portsShown) {
-      const n = shared("cockpit.servers");
-      if (typeof n === "number" && n !== this.servers) { this.servers = n; cx.notify(); }
-      return;
-    }
-    this.scanning = true;
-    cx.spawn(async (cx) => {
-      let n = this.servers;
-      try {
-        const base = home();
-        const sockets = await exec("lsof", ["-nP", "-iTCP", "-sTCP:LISTEN", "-F", "pcn"], { cwd: base, timeout: 15000 });
-        const found = new Map();
-        let pid = null, cmd = "";
-        for (const line of sockets.stdout.split("\n")) {
-          const tag = line[0], rest = line.slice(1);
-          if (tag === "p") pid = Number(rest);
-          else if (tag === "c") cmd = rest;
-          else if (tag === "n" && pid !== null) {
-            const port = Number(rest.slice(rest.lastIndexOf(":") + 1));
-            if (Number.isFinite(port)) found.set(`${pid}:${port}`, { pid, cmd });
-          }
-        }
-        const pids = [...new Set([...found.values()].map((x) => x.pid))];
-        if (!pids.length) n = 0;
-        else {
-          const [cwd, ps] = await Promise.all([
-            exec("lsof", ["-a", "-d", "cwd", "-Fpn", "-p", pids.join(",")], { cwd: base, timeout: 15000 }),
-            exec("ps", ["-o", "pid=,command=", "-p", pids.join(",")], { cwd: base, timeout: 15000 }),
-          ]);
-          const folders = new Map(), commands = new Map();
-          let at = null;
-          for (const line of cwd.stdout.split("\n")) {
-            if (line[0] === "p") at = Number(line.slice(1));
-            else if (line[0] === "n" && at !== null) folders.set(at, line.slice(1));
-          }
-          for (const line of ps.stdout.split("\n")) {
-            const m = line.match(/^\s*(\d+)\s+(.*)$/);
-            if (m) commands.set(Number(m[1]), m[2]);
-          }
-          n = [...found.values()].filter((x) => {
-            const dir = folders.get(x.pid) ?? "";
-            const command = commands.get(x.pid) ?? x.cmd;
-            const word = command.split(/\s+/)[0].split("/").pop();
-            const tool = TOOLS.has(word) || TOOLS.has(x.cmd) || VERSION.test(x.cmd);
-            return word === "plannotator" || x.cmd === "plannotator" || (dir.startsWith(`${base}/`) && !dir.startsWith(`${base}/Library`) && !tool);
-          }).length;
-        }
-      } catch {}
-      this.scanning = false;
-      if (n !== this.servers) {
-        this.servers = n;
-        cx.notify();
-      }
-    });
-  }
-
-  // To-do tasks: read from the file the Tasks pane saves, so the count is right even before that pane has been opened.
-  readTodo(cx) {
-    if (!window()?.active) return;
-    cx.spawn(async (cx) => {
-      let n = this.todo;
-      try {
-        const text = await readTextFile(`${appHome()}/cockpit-tasks/tasks.json`);
-        n = text ? JSON.parse(text).filter((x) => x.status === "todo").length : 0;
-      } catch {}
-      if (n !== this.todo) {
-        this.todo = n;
-        cx.notify();
-      }
-    });
-  }
-
   // "\u23181" for tab 1, from the key actually bound to tab.select:1.
   shortcut(n) {
     const mac = window()?.platform === "macos";
     const mod = { cmd: mac ? "\u2318" : "Ctrl+", ctrl: mac ? "\u2303" : "Ctrl+", shift: mac ? "\u21e7" : "Shift+", alt: mac ? "\u2325" : "Alt+", option: mac ? "\u2325" : "Alt+" };
     const b = keys().find((k) => k.section === "global" && k.action === `tab.select:${n}`);
     return b ? b.keys.split("-").map((p) => mod[p.toLowerCase()] ?? p.toUpperCase()).join("") : null;
-  }
-
-  clearPanelDrag(cx) {
-    const changed = this.panelDragged;
-    this.panelPress = null;
-    this.panelDrop = null;
-    this.panelDragged = false;
-    if (changed) cx.notify();
-  }
-
-  movePanel(from, target, after, ids) {
-    const order = ids.filter(id => id !== from);
-    order.splice(order.indexOf(target) + (after ? 1 : 0), 0, from);
-    this.panelOrder = order;
-    localStorage.setItem("panel-order", JSON.stringify(order));
   }
 
   render() {
@@ -611,119 +505,8 @@ export default class Tabs extends View {
     const lightsPadding = w?.platform === "macos" && w.titlebar === "none" && !w.fullscreen && root?.traffic_lights
       ? Math.max(10, (root.traffic_lights[0] + 64) / settings().zoom - (sidebar?.hidden ? 0 : sidebar?.size?.px ?? 0))
       : 10;
-    const panel = find(root, "panel"), body = find(root, "panel-body"), lowerStack = find(root, "panel-lower");
-    const lowerOn = panel && !panel.hidden && lowerStack && !lowerStack.hidden ? lowerStack.active?.replace(/^lower-/, "") : null;
     this.feed.updateBadge();
-    // Waiting for your review: others' open, non-draft MRs naming you that you haven't approved (from the feed).
-    const mrs = shared("cockpit.mrs");
-    const review = (mrs?.reviews ?? []).filter(m => !m.draft && !m.approvedByMe).length;
-    const failedMine = (mrs?.mine ?? []).filter(m => m.pipeline === "failed" && !m.draft).length;
-    // What the Inbox holds: agents that need you, and ones that finished while you were away.
-    const waiting = agents().filter(a => a.status === "blocked" || a.status === "done");
-    const blocked = waiting.filter(a => a.status === "blocked").length;
-    const finished = waiting.length - blocked;
-    const inboxColor = blocked ? t.blocked : t.done;
-    // Annotations waiting in the space you're in; amber while some are queued for a busy agent.
-    const annoAll = notesOf(shared(ANNOTATIONS));
-    const annoHere = annoAll.filter((n) => !n.queued && n.source?.space === focused()?.space).length;
-    const annoQueued = annoAll.filter((n) => n.queued).length;
-    // label: text next to the icon; without it the button is icon-only and says what it is on hover.
-    const panelButton = (id, label, icon, tip, badge) => {
-      const on = panel && !panel.hidden && body?.active === id;
-      const below = lowerOn === id;
-      const canLower = LOWER.has(id);
-      return h_flex().id(`panel-${id}`).relative().h(26).px(label ? 8 : 7).gap(5).flex_none().items_center().rounded(6)
-        .text_size(12).bg(on ? t.selected : t.chrome).text_color(on || below ? t.foreground : t.muted)
-        .cursor_pointer().tooltip(`${tip ?? label}${canLower ? " · right-click: open below" : ""} · drag to reorder`)
-        .accessibility_label(`${tip ?? label}${on ? ", open" : below ? ", open below" : ""}`)
-        // Shown in the lower half: a short line under the icon.
-        .when(below, el => el.child(div().absolute().bottom(1).left(8).w(10).h(2).rounded(1).bg(t.accent)))
-        .when(canLower, el => el.on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); this.toggleLower(id); }))
-        .hover(s => s.bg(on ? t.selected : t.hover)).active(s => s.bg(t.selected))
-        .when(this.panelDragged && this.panelPress?.id === id, el => el.opacity(0.5))
-        .when(this.panelDragged && this.panelDrop?.id === id && this.panelPress?.id !== id
-          && (ATTENTION.includes(id) === ATTENTION.includes(this.panelPress?.id)) && (TOOLS.includes(id) === TOOLS.includes(this.panelPress?.id)), el => el.child(
-          div().absolute().top(3).bottom(3).w(2).bg(t.accent)
-            .when(this.panelDrop.after, line => line.right(0))
-            .when(!this.panelDrop.after, line => line.left(0))))
-        .on_mouse_down("left", (e, cx) => {
-          cx.stop_propagation();
-          this.panelPress = { id, x: e.position.x, y: e.position.y };
-          this.panelDrop = null;
-          this.panelDragged = false;
-          this.skipPanelClick = false;
-        })
-        .on_mouse_move((e, cx) => {
-          if (!this.panelPress) return;
-          if (!this.panelDragged && Math.hypot(e.position.x - this.panelPress.x, e.position.y - this.panelPress.y) < 5) return;
-          const after = e.local_position.x > e.bounds.width / 2;
-          if (!this.panelDragged || this.panelDrop?.id !== id || this.panelDrop?.after !== after) {
-            this.panelDragged = true;
-            this.panelDrop = { id, after };
-            cx.notify();
-          }
-        })
-        .on_mouse_up("left", (_e, cx) => {
-          cx.stop_propagation();
-          this.skipPanelClick = this.panelDragged;
-          // Buttons stay in their group, so a drop counts only next to one of the same group.
-          const group = (x) => (ATTENTION.includes(x) ? "a" : TOOLS.includes(x) ? "t" : "m");
-          if (this.panelDragged && this.panelPress?.id !== id && this.panelDrop?.id === id && group(this.panelPress.id) === group(id)) {
-            this.movePanel(this.panelPress.id, id, this.panelDrop.after, orderedPanels.map(p => p[0]));
-          }
-          this.clearPanelDrag(cx);
-        })
-        .on_click(() => {
-          if (this.skipPanelClick) return;
-          this.showPanel(id, true);
-        }).child(svg(icon).size(14))
-        .when(Boolean(label), el => el.child(label))
-        .when(Boolean(badge), el => el.child(div().h(16).min_w(16).px(4).flex().items_center().justify_center().rounded(8).bg(badge.color + "33").text_size(10.5).font_semibold().text_color(badge.color).child(String(badge.n))));
-    };
-    // Words next to the icons while there is room for them.
     const words = this.barWidth === null || this.barWidth >= 1100;
-    const named = (text) => (words ? text : null);
-    const panels = [
-      ["home", named("Home"), "mods/cockpit-tabs/home.svg", "Home · what needs you now"],
-      ["projects", named("Projects"), "mods/cockpit-tabs/projects.svg", "Projects · jump to or start a project"],
-      ["talk", named("Agent talk"), "mods/cockpit-tabs/talk.svg", "Agent talk · which agents message which"],
-      ["automations", named("Automations"), "mods/cockpit-tabs/automations.svg", "Automations · scheduled cron jobs"],
-      ["review", named("Review"), "mods/cockpit-workspace-chrome/git-compare.svg", "Review changes in Hunk"],
-      ["annotate", named("Annotations"), "mods/cockpit-tabs/annotate.svg", [annoHere ? `${annoHere} in this space` : null, annoQueued ? `${annoQueued} queued` : null].filter(Boolean).length ? `Annotations · ${[annoHere ? `${annoHere} in this space` : null, annoQueued ? `${annoQueued} queued` : null].filter(Boolean).join(", ")}` : "Annotations · notes on terminal text for agents",
-        annoQueued ? { n: annoHere + annoQueued, color: t.working } : annoHere ? { n: annoHere, color: t.muted } : null],
-      ["usage", named("Monitoring"), "mods/cockpit-tabs/chart.svg", "Monitoring · limits, CPU and memory"],
-      ["ports", named("Ports"), "mods/cockpit-tabs/plug.svg", this.servers ? `Ports · ${this.servers} ${this.servers === 1 ? "server" : "servers"} running` : "Ports and servers", this.servers ? { n: this.servers, color: t.ansi2 } : null],
-      ["tasks", named("Tasks"), "mods/cockpit-tabs/list-todo.svg", this.todo ? `Tasks · ${this.todo} to do` : "Tasks", this.todo ? { n: this.todo, color: t.muted } : null],
-      ["inbox", named("Inbox"), "mods/cockpit-tabs/inbox.svg", waiting.length ? `Inbox · ${[blocked ? `${blocked} need you` : null, finished ? `${finished} done` : null].filter(Boolean).join(", ")}` : "Inbox · reply to agents", waiting.length ? { n: waiting.length, color: inboxColor } : null],
-      ["mrs", named("MRs"), "mods/cockpit-tabs/git-pull-request.svg", [review ? `${review} to review` : null, failedMine ? `${failedMine} failed` : null].filter(Boolean).length ? `Merge requests · ${[review ? `${review} to review` : null, failedMine ? `${failedMine} failed` : null].filter(Boolean).join(", ")}` : "Merge requests",
-        failedMine ? { n: failedMine + review, color: t.blocked } : review ? { n: review, color: t.accent } : null],
-    ];
-    const saved = [...new Set(this.panelOrder)].filter(id => panels.some(p => p[0] === id));
-    // Panels new since the order was saved (Home) go first, where they'd be by default.
-    const order = [...panels.map(p => p[0]).filter(id => !saved.includes(id)), ...saved];
-    const orderedPanels = order.map(id => panels.find(p => p[0] === id));
-    // Two groups keep a button: what needs you, then the tools you glance at. The rest sit behind the
-    // Panels menu (and Ctrl+B p on the keyboard). Dragging reorders within a group.
-    const ATTENTION = ["home", "inbox", "mrs", "tasks"], TOOLS = ["annotate", "ports", "usage", "talk"];
-    const attention = orderedPanels.filter(p => ATTENTION.includes(p[0]));
-    const tools = orderedPanels.filter(p => TOOLS.includes(p[0]));
-    const menuPanels = orderedPanels.filter(p => !ATTENTION.includes(p[0]) && !TOOLS.includes(p[0]));
-    const openHidden = panel && !panel.hidden ? menuPanels.find(p => p[0] === body?.active) : null;
-    const menuBadge = !openHidden && menuPanels.some(p => p[4]);
-    const divider = (id) => div().id(id).w(1).h(16).mx(5).flex_none().bg(t.border);
-    const panelsMenu = h_flex().id("panels-menu").h(26).px(words ? 8 : 7).gap(5).flex_none().items_center().rounded(6).text_size(12)
-      .bg(openHidden ? t.selected : t.chrome).text_color(openHidden ? t.foreground : t.muted)
-      .cursor_pointer().tooltip(openHidden ? `${NAMES[openHidden[0]]} · more panels` : "More panels").accessibility_label("More panels")
-      .hover(s => s.bg(openHidden ? t.selected : t.hover).text_color(t.foreground)).active(s => s.bg(t.selected))
-      .on_mouse_down("left", stop)
-      .on_click(() => openOverlay({
-        mod: "cockpit-panel-menu", kind: "popup", width: 230, height: menuPanels.length * 31 + 48, at: "pointer",
-        props: { items: menuPanels.map(([id, _label, icon, tip, badge]) => ({ id, label: NAMES[id] ?? id, icon, tip, badge: badge ?? null })), active: openHidden?.[0] ?? null },
-      }))
-      .child(svg(openHidden ? openHidden[2] : "mods/cockpit-tabs/panels.svg").size(14))
-      .when(words, el => el.child(openHidden ? NAMES[openHidden[0]] : "Panels"))
-      .child(div().text_size(9).text_color(t.dim).child("▾"))
-      .when(menuBadge, el => el.child(div().size(6).rounded(3).bg(t.ansi2)));
     return h_flex().id("tab-bar").size_full().min_w(0).px(10).pl(lightsPadding)
       .on_size_change((size, cx) => {
         if (this.barWidth !== size.width) {
@@ -731,9 +514,7 @@ export default class Tabs extends View {
           cx.notify();
         }
       }).gap(3).items_center().bg(t.chrome).border_b(1).border_color(t.border)
-      .on_mouse_up("left", (_e, cx) => { this.pressed = null; this.clearPanelDrag(cx); })
-      .on_mouse_down_out((_e, cx) => this.clearPanelDrag(cx))
-      .on_hover((hovered, cx) => { if (!hovered) this.clearPanelDrag(cx); })
+      .on_mouse_up("left", () => { this.pressed = null; })
       .child(h_flex().id("tab-scroll").flex_1().min_w(0).h_full().items_center().gap(3).overflow_x_scrollbar().track_scroll(this.scroll)
         // The wheel over the tabs steps through them: one step per 40px of scrolling, so a trackpad
         // flick moves one or two tabs, not ten.
@@ -753,11 +534,6 @@ export default class Tabs extends View {
         .on_click((_e, cx) => this.openNeovim(cx))
         .child(svg("mods/cockpit-workspace-chrome/terminal.svg").size(14))
         .when(words, el => el.child("Neovim")))
-      .child(divider("bar-div-1"))
-      .children(attention.map(args => panelButton(...args)))
-      .child(divider("bar-div-2"))
-      .children(tools.map(args => panelButton(...args)))
-      .child(panelsMenu)
       .when(w?.buttons, el => el.child(button("minimize", w.platform === "windows" ? svg("mods/cockpit-tabs/win-min.svg").size(16) : "−", () => run("window.minimize"), "Minimize"))
         .child(button("maximize", w.platform === "windows" ? svg(`mods/cockpit-tabs/${w.maximized ? "win-restore" : "win-max"}.svg`).size(16) : "□", () => run("window.maximize"), w.maximized ? "Restore" : "Maximize"))
         .child(button("close-window", w.platform === "windows" ? svg("mods/cockpit-tabs/win-close.svg").size(16) : svg("mods/cockpit-pane/close.svg").size(13), () => run("window.close"), "Close window")));
